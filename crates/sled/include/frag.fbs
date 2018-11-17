@@ -1,0 +1,82 @@
+namespace Sled.Frag;
+
+union Frag {
+  Set,
+  Del,
+  Merge,
+  Base,
+  ChildSplit,
+  ParentSplit,
+}
+
+table Set {
+  key:[ubyte];
+  value:[ubyte];
+}
+
+table Del {
+  key:[ubyte];
+}
+
+table Merge {
+  key:[ubyte];
+  value:[ubyte];
+}
+
+union Bound {
+  Inclusive,
+  Exclusive,
+  Infinity,
+}
+
+table ChildSplit {
+  at:Bound;
+  to:ulong;
+}
+
+table  ParentSplit {
+  at:Bound;
+  to:ulong;
+}
+
+table Inclusive {
+  key:[ubyte];
+}
+
+table Exclusive {
+  key:[ubyte];
+}
+
+table Infinity{}
+
+union Data {
+  Leaf,
+  Index,
+}
+
+table Leaf {
+  kvs:[Kv];
+}
+
+table Kv {
+  key:[ubyte];
+  value:[ubyte];
+}
+
+table Index {
+  children:[Child];
+}
+
+table Child {
+  key:[ubyte];
+  id:ulong;
+}
+
+table Base {
+  id:ulong;
+  data:Data;
+  next:ulong;
+  lo:Bound;
+  hi:Bound;
+  replaced_root:ulong;
+}
