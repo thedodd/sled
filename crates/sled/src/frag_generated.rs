@@ -35,11 +35,12 @@ pub enum Frag {
   Base = 4,
   ChildSplit = 5,
   ParentSplit = 6,
+  Counter = 7,
 
 }
 
 const ENUM_MIN_FRAG: u8 = 0;
-const ENUM_MAX_FRAG: u8 = 6;
+const ENUM_MAX_FRAG: u8 = 7;
 
 impl<'a> flatbuffers::Follow<'a> for Frag {
   type Inner = Self;
@@ -73,25 +74,27 @@ impl flatbuffers::Push for Frag {
 }
 
 #[allow(non_camel_case_types)]
-const ENUM_VALUES_FRAG:[Frag; 7] = [
+const ENUM_VALUES_FRAG:[Frag; 8] = [
   Frag::NONE,
   Frag::Set,
   Frag::Del,
   Frag::Merge,
   Frag::Base,
   Frag::ChildSplit,
-  Frag::ParentSplit
+  Frag::ParentSplit,
+  Frag::Counter
 ];
 
 #[allow(non_camel_case_types)]
-const ENUM_NAMES_FRAG:[&'static str; 7] = [
+const ENUM_NAMES_FRAG:[&'static str; 8] = [
     "NONE",
     "Set",
     "Del",
     "Merge",
     "Base",
     "ChildSplit",
-    "ParentSplit"
+    "ParentSplit",
+    "Counter"
 ];
 
 pub fn enum_name_frag(e: Frag) -> &'static str {
@@ -100,73 +103,6 @@ pub fn enum_name_frag(e: Frag) -> &'static str {
 }
 
 pub struct FragUnionTableOffset {}
-#[allow(non_camel_case_types)]
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Bound {
-  NONE = 0,
-  Inclusive = 1,
-  Exclusive = 2,
-  Infinity = 3,
-
-}
-
-const ENUM_MIN_BOUND: u8 = 0;
-const ENUM_MAX_BOUND: u8 = 3;
-
-impl<'a> flatbuffers::Follow<'a> for Bound {
-  type Inner = Self;
-  #[inline]
-  fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
-    flatbuffers::read_scalar_at::<Self>(buf, loc)
-  }
-}
-
-impl flatbuffers::EndianScalar for Bound {
-  #[inline]
-  fn to_little_endian(self) -> Self {
-    let n = u8::to_le(self as u8);
-    let p = &n as *const u8 as *const Bound;
-    unsafe { *p }
-  }
-  #[inline]
-  fn from_little_endian(self) -> Self {
-    let n = u8::from_le(self as u8);
-    let p = &n as *const u8 as *const Bound;
-    unsafe { *p }
-  }
-}
-
-impl flatbuffers::Push for Bound {
-    type Output = Bound;
-    #[inline]
-    fn push(&self, dst: &mut [u8], _rest: &[u8]) {
-        flatbuffers::emplace_scalar::<Bound>(dst, *self);
-    }
-}
-
-#[allow(non_camel_case_types)]
-const ENUM_VALUES_BOUND:[Bound; 4] = [
-  Bound::NONE,
-  Bound::Inclusive,
-  Bound::Exclusive,
-  Bound::Infinity
-];
-
-#[allow(non_camel_case_types)]
-const ENUM_NAMES_BOUND:[&'static str; 4] = [
-    "NONE",
-    "Inclusive",
-    "Exclusive",
-    "Infinity"
-];
-
-pub fn enum_name_bound(e: Bound) -> &'static str {
-  let index: usize = e as usize;
-  ENUM_NAMES_BOUND[index]
-}
-
-pub struct BoundUnionTableOffset {}
 #[allow(non_camel_case_types)]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -231,6 +167,82 @@ pub fn enum_name_data(e: Data) -> &'static str {
 }
 
 pub struct DataUnionTableOffset {}
+pub enum CounterOffset {}
+#[derive(Copy, Clone, Debug, PartialEq)]
+
+pub struct Counter<'a> {
+  pub _tab: flatbuffers::Table<'a>,
+}
+
+impl<'a> flatbuffers::Follow<'a> for Counter<'a> {
+    type Inner = Counter<'a>;
+    #[inline]
+    fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+        Self {
+            _tab: flatbuffers::Table { buf: buf, loc: loc },
+        }
+    }
+}
+
+impl<'a> Counter<'a> {
+    #[inline]
+    pub fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
+        Counter {
+            _tab: table,
+        }
+    }
+    #[allow(unused_mut)]
+    pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
+        _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
+        args: &'args CounterArgs) -> flatbuffers::WIPOffset<Counter<'bldr>> {
+      let mut builder = CounterBuilder::new(_fbb);
+      builder.add_count(args.count);
+      builder.finish()
+    }
+
+    pub const VT_COUNT: flatbuffers::VOffsetT = 4;
+
+  #[inline]
+  pub fn count(&self) -> u64 {
+    self._tab.get::<u64>(Counter::VT_COUNT, Some(0)).unwrap()
+  }
+}
+
+pub struct CounterArgs {
+    pub count: u64,
+}
+impl<'a> Default for CounterArgs {
+    #[inline]
+    fn default() -> Self {
+        CounterArgs {
+            count: 0,
+        }
+    }
+}
+pub struct CounterBuilder<'a: 'b, 'b> {
+  fbb_: &'b mut flatbuffers::FlatBufferBuilder<'a>,
+  start_: flatbuffers::WIPOffset<flatbuffers::TableUnfinishedWIPOffset>,
+}
+impl<'a: 'b, 'b> CounterBuilder<'a, 'b> {
+  #[inline]
+  pub fn add_count(&mut self, count: u64) {
+    self.fbb_.push_slot::<u64>(Counter::VT_COUNT, count, 0);
+  }
+  #[inline]
+  pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a>) -> CounterBuilder<'a, 'b> {
+    let start = _fbb.start_table();
+    CounterBuilder {
+      fbb_: _fbb,
+      start_: start,
+    }
+  }
+  #[inline]
+  pub fn finish(self) -> flatbuffers::WIPOffset<Counter<'a>> {
+    let o = self.fbb_.end_table(self.start_);
+    flatbuffers::WIPOffset::new(o.value())
+  }
+}
+
 pub enum SetOffset {}
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -510,72 +522,34 @@ impl<'a> ChildSplit<'a> {
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args ChildSplitArgs) -> flatbuffers::WIPOffset<ChildSplit<'bldr>> {
+        args: &'args ChildSplitArgs<'args>) -> flatbuffers::WIPOffset<ChildSplit<'bldr>> {
       let mut builder = ChildSplitBuilder::new(_fbb);
       builder.add_to(args.to);
       if let Some(x) = args.at { builder.add_at(x); }
-      builder.add_at_type(args.at_type);
       builder.finish()
     }
 
-    pub const VT_AT_TYPE: flatbuffers::VOffsetT = 4;
-    pub const VT_AT: flatbuffers::VOffsetT = 6;
-    pub const VT_TO: flatbuffers::VOffsetT = 8;
+    pub const VT_AT: flatbuffers::VOffsetT = 4;
+    pub const VT_TO: flatbuffers::VOffsetT = 6;
 
   #[inline]
-  pub fn at_type(&self) -> Bound {
-    self._tab.get::<Bound>(ChildSplit::VT_AT_TYPE, Some(Bound::NONE)).unwrap()
-  }
-  #[inline]
-  pub fn at(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(ChildSplit::VT_AT, None)
+  pub fn at(&self) -> Option<&'a [u8]> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(ChildSplit::VT_AT, None).map(|v| v.safe_slice())
   }
   #[inline]
   pub fn to(&self) -> u64 {
     self._tab.get::<u64>(ChildSplit::VT_TO, Some(0)).unwrap()
   }
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_inclusive(&'a self) -> Option<Inclusive> {
-    if self.at_type() == Bound::Inclusive {
-      self.at().map(|u| Inclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_exclusive(&'a self) -> Option<Exclusive> {
-    if self.at_type() == Bound::Exclusive {
-      self.at().map(|u| Exclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_infinity(&'a self) -> Option<Infinity> {
-    if self.at_type() == Bound::Infinity {
-      self.at().map(|u| Infinity::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
 }
 
-pub struct ChildSplitArgs {
-    pub at_type: Bound,
-    pub at: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+pub struct ChildSplitArgs<'a> {
+    pub at: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a ,  u8>>>,
     pub to: u64,
 }
-impl<'a> Default for ChildSplitArgs {
+impl<'a> Default for ChildSplitArgs<'a> {
     #[inline]
     fn default() -> Self {
         ChildSplitArgs {
-            at_type: Bound::NONE,
             at: None,
             to: 0,
         }
@@ -587,11 +561,7 @@ pub struct ChildSplitBuilder<'a: 'b, 'b> {
 }
 impl<'a: 'b, 'b> ChildSplitBuilder<'a, 'b> {
   #[inline]
-  pub fn add_at_type(&mut self, at_type: Bound) {
-    self.fbb_.push_slot::<Bound>(ChildSplit::VT_AT_TYPE, at_type, Bound::NONE);
-  }
-  #[inline]
-  pub fn add_at(&mut self, at: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+  pub fn add_at(&mut self, at: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ChildSplit::VT_AT, at);
   }
   #[inline]
@@ -640,72 +610,34 @@ impl<'a> ParentSplit<'a> {
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args ParentSplitArgs) -> flatbuffers::WIPOffset<ParentSplit<'bldr>> {
+        args: &'args ParentSplitArgs<'args>) -> flatbuffers::WIPOffset<ParentSplit<'bldr>> {
       let mut builder = ParentSplitBuilder::new(_fbb);
       builder.add_to(args.to);
       if let Some(x) = args.at { builder.add_at(x); }
-      builder.add_at_type(args.at_type);
       builder.finish()
     }
 
-    pub const VT_AT_TYPE: flatbuffers::VOffsetT = 4;
-    pub const VT_AT: flatbuffers::VOffsetT = 6;
-    pub const VT_TO: flatbuffers::VOffsetT = 8;
+    pub const VT_AT: flatbuffers::VOffsetT = 4;
+    pub const VT_TO: flatbuffers::VOffsetT = 6;
 
   #[inline]
-  pub fn at_type(&self) -> Bound {
-    self._tab.get::<Bound>(ParentSplit::VT_AT_TYPE, Some(Bound::NONE)).unwrap()
-  }
-  #[inline]
-  pub fn at(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(ParentSplit::VT_AT, None)
+  pub fn at(&self) -> Option<&'a [u8]> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(ParentSplit::VT_AT, None).map(|v| v.safe_slice())
   }
   #[inline]
   pub fn to(&self) -> u64 {
     self._tab.get::<u64>(ParentSplit::VT_TO, Some(0)).unwrap()
   }
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_inclusive(&'a self) -> Option<Inclusive> {
-    if self.at_type() == Bound::Inclusive {
-      self.at().map(|u| Inclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_exclusive(&'a self) -> Option<Exclusive> {
-    if self.at_type() == Bound::Exclusive {
-      self.at().map(|u| Exclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn at_as_infinity(&'a self) -> Option<Infinity> {
-    if self.at_type() == Bound::Infinity {
-      self.at().map(|u| Infinity::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
 }
 
-pub struct ParentSplitArgs {
-    pub at_type: Bound,
-    pub at: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+pub struct ParentSplitArgs<'a> {
+    pub at: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a ,  u8>>>,
     pub to: u64,
 }
-impl<'a> Default for ParentSplitArgs {
+impl<'a> Default for ParentSplitArgs<'a> {
     #[inline]
     fn default() -> Self {
         ParentSplitArgs {
-            at_type: Bound::NONE,
             at: None,
             to: 0,
         }
@@ -717,11 +649,7 @@ pub struct ParentSplitBuilder<'a: 'b, 'b> {
 }
 impl<'a: 'b, 'b> ParentSplitBuilder<'a, 'b> {
   #[inline]
-  pub fn add_at_type(&mut self, at_type: Bound) {
-    self.fbb_.push_slot::<Bound>(ParentSplit::VT_AT_TYPE, at_type, Bound::NONE);
-  }
-  #[inline]
-  pub fn add_at(&mut self, at: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+  pub fn add_at(&mut self, at: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(ParentSplit::VT_AT, at);
   }
   #[inline]
@@ -1313,7 +1241,7 @@ impl<'a> Base<'a> {
     #[allow(unused_mut)]
     pub fn create<'bldr: 'args, 'args: 'mut_bldr, 'mut_bldr>(
         _fbb: &'mut_bldr mut flatbuffers::FlatBufferBuilder<'bldr>,
-        args: &'args BaseArgs) -> flatbuffers::WIPOffset<Base<'bldr>> {
+        args: &'args BaseArgs<'args>) -> flatbuffers::WIPOffset<Base<'bldr>> {
       let mut builder = BaseBuilder::new(_fbb);
       builder.add_replaced_root(args.replaced_root);
       builder.add_next(args.next);
@@ -1321,8 +1249,6 @@ impl<'a> Base<'a> {
       if let Some(x) = args.hi { builder.add_hi(x); }
       if let Some(x) = args.lo { builder.add_lo(x); }
       if let Some(x) = args.data { builder.add_data(x); }
-      builder.add_hi_type(args.hi_type);
-      builder.add_lo_type(args.lo_type);
       builder.add_data_type(args.data_type);
       builder.finish()
     }
@@ -1331,11 +1257,9 @@ impl<'a> Base<'a> {
     pub const VT_DATA_TYPE: flatbuffers::VOffsetT = 6;
     pub const VT_DATA: flatbuffers::VOffsetT = 8;
     pub const VT_NEXT: flatbuffers::VOffsetT = 10;
-    pub const VT_LO_TYPE: flatbuffers::VOffsetT = 12;
-    pub const VT_LO: flatbuffers::VOffsetT = 14;
-    pub const VT_HI_TYPE: flatbuffers::VOffsetT = 16;
-    pub const VT_HI: flatbuffers::VOffsetT = 18;
-    pub const VT_REPLACED_ROOT: flatbuffers::VOffsetT = 20;
+    pub const VT_LO: flatbuffers::VOffsetT = 12;
+    pub const VT_HI: flatbuffers::VOffsetT = 14;
+    pub const VT_REPLACED_ROOT: flatbuffers::VOffsetT = 16;
 
   #[inline]
   pub fn id(&self) -> u64 {
@@ -1354,20 +1278,12 @@ impl<'a> Base<'a> {
     self._tab.get::<u64>(Base::VT_NEXT, Some(0)).unwrap()
   }
   #[inline]
-  pub fn lo_type(&self) -> Bound {
-    self._tab.get::<Bound>(Base::VT_LO_TYPE, Some(Bound::NONE)).unwrap()
+  pub fn lo(&self) -> Option<&'a [u8]> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(Base::VT_LO, None).map(|v| v.safe_slice())
   }
   #[inline]
-  pub fn lo(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Base::VT_LO, None)
-  }
-  #[inline]
-  pub fn hi_type(&self) -> Bound {
-    self._tab.get::<Bound>(Base::VT_HI_TYPE, Some(Bound::NONE)).unwrap()
-  }
-  #[inline]
-  pub fn hi(&self) -> Option<flatbuffers::Table<'a>> {
-    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Base::VT_HI, None)
+  pub fn hi(&self) -> Option<&'a [u8]> {
+    self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, u8>>>(Base::VT_HI, None).map(|v| v.safe_slice())
   }
   #[inline]
   pub fn replaced_root(&self) -> u64 {
@@ -1393,80 +1309,18 @@ impl<'a> Base<'a> {
     }
   }
 
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn lo_as_inclusive(&'a self) -> Option<Inclusive> {
-    if self.lo_type() == Bound::Inclusive {
-      self.lo().map(|u| Inclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn lo_as_exclusive(&'a self) -> Option<Exclusive> {
-    if self.lo_type() == Bound::Exclusive {
-      self.lo().map(|u| Exclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn lo_as_infinity(&'a self) -> Option<Infinity> {
-    if self.lo_type() == Bound::Infinity {
-      self.lo().map(|u| Infinity::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn hi_as_inclusive(&'a self) -> Option<Inclusive> {
-    if self.hi_type() == Bound::Inclusive {
-      self.hi().map(|u| Inclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn hi_as_exclusive(&'a self) -> Option<Exclusive> {
-    if self.hi_type() == Bound::Exclusive {
-      self.hi().map(|u| Exclusive::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
-  #[inline]
-  #[allow(non_snake_case)]
-  pub fn hi_as_infinity(&'a self) -> Option<Infinity> {
-    if self.hi_type() == Bound::Infinity {
-      self.hi().map(|u| Infinity::init_from_table(u))
-    } else {
-      None
-    }
-  }
-
 }
 
-pub struct BaseArgs {
+pub struct BaseArgs<'a> {
     pub id: u64,
     pub data_type: Data,
     pub data: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
     pub next: u64,
-    pub lo_type: Bound,
-    pub lo: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
-    pub hi_type: Bound,
-    pub hi: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub lo: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a ,  u8>>>,
+    pub hi: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a ,  u8>>>,
     pub replaced_root: u64,
 }
-impl<'a> Default for BaseArgs {
+impl<'a> Default for BaseArgs<'a> {
     #[inline]
     fn default() -> Self {
         BaseArgs {
@@ -1474,9 +1328,7 @@ impl<'a> Default for BaseArgs {
             data_type: Data::NONE,
             data: None,
             next: 0,
-            lo_type: Bound::NONE,
             lo: None,
-            hi_type: Bound::NONE,
             hi: None,
             replaced_root: 0,
         }
@@ -1504,19 +1356,11 @@ impl<'a: 'b, 'b> BaseBuilder<'a, 'b> {
     self.fbb_.push_slot::<u64>(Base::VT_NEXT, next, 0);
   }
   #[inline]
-  pub fn add_lo_type(&mut self, lo_type: Bound) {
-    self.fbb_.push_slot::<Bound>(Base::VT_LO_TYPE, lo_type, Bound::NONE);
-  }
-  #[inline]
-  pub fn add_lo(&mut self, lo: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+  pub fn add_lo(&mut self, lo: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Base::VT_LO, lo);
   }
   #[inline]
-  pub fn add_hi_type(&mut self, hi_type: Bound) {
-    self.fbb_.push_slot::<Bound>(Base::VT_HI_TYPE, hi_type, Bound::NONE);
-  }
-  #[inline]
-  pub fn add_hi(&mut self, hi: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
+  pub fn add_hi(&mut self, hi: flatbuffers::WIPOffset<flatbuffers::Vector<'b , u8>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Base::VT_HI, hi);
   }
   #[inline]

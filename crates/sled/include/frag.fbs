@@ -7,6 +7,11 @@ union Frag {
   Base,
   ChildSplit,
   ParentSplit,
+  Counter,
+}
+
+table Counter {
+  count:uint64;
 }
 
 table Set {
@@ -23,19 +28,13 @@ table Merge {
   value:[ubyte];
 }
 
-union Bound {
-  Inclusive,
-  Exclusive,
-  Infinity,
-}
-
 table ChildSplit {
-  at:Bound;
+  at:[ubyte];
   to:ulong;
 }
 
 table  ParentSplit {
-  at:Bound;
+  at:[ubyte];
   to:ulong;
 }
 
@@ -76,7 +75,7 @@ table Base {
   id:ulong;
   data:Data;
   next:ulong;
-  lo:Bound;
-  hi:Bound;
+  lo:[ubyte];
+  hi:[ubyte];
   replaced_root:ulong;
 }
