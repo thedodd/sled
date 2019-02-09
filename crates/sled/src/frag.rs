@@ -1,9 +1,6 @@
 use super::*;
 
 // TODO
-// Merged
-// LeftMerge(head: Raw, rhs: PageId, hi: Bound)
-// ParentMerge(lhs: PageId, rhs: PageId)
 // TxBegin(TxID), // in-mem
 // TxCommit(TxID), // in-mem
 // TxAbort(TxID), // in-mem
@@ -18,6 +15,9 @@ pub(crate) enum Frag {
     ParentSplit(ParentSplit),
     Counter(usize),
     Meta(Meta),
+    RightMerge,
+    LeftMerge(LeftMerge),
+    ParentMerge(PageId),
 }
 
 impl Frag {
@@ -48,4 +48,11 @@ pub(crate) struct ParentSplit {
 pub(crate) struct ChildSplit {
     pub(crate) at: IVec,
     pub(crate) to: PageId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LeftMerge {
+    pub(crate) new_hi: IVec,
+    pub(crate) new_next: Option<PageId>,
+    pub(crate) merged_items: Vec<(IVec, IVec)>,
 }
