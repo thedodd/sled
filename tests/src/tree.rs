@@ -121,6 +121,7 @@ pub enum Op {
     Del(Key),
     Cas(Key, u8, u8),
     Scan(Key, usize),
+    Clear,
     Restart,
 }
 
@@ -138,6 +139,10 @@ impl Op {
 
 impl Arbitrary for Op {
     fn arbitrary<G: Gen>(g: &mut G) -> Op {
+        if g.gen_bool(1. / 10000.) {
+            return Clear;
+        }
+
         if g.gen_bool(1. / 10.) {
             return Restart;
         }
@@ -169,7 +174,8 @@ impl Arbitrary for Op {
             }
             Scan(ref k, len) => Box::new(k.shrink().map(move |k| Scan(k, len))),
             Del(ref k) => Box::new(k.shrink().map(Del)),
-            Restart => Box::new(vec![].into_iter()),
+            Clear => Box::new(std::iter::empty()),
+            Restart => Box::new(std::iter::empty()),
         }
     }
 }
@@ -295,6 +301,10 @@ pub fn prop_tree_matches_btreemap(
                          to match our BTreeMap model"
                     );
                 }
+            }
+            Clear => {
+                tree.clear().unwrap();
+                reference.clear();
             }
             Restart => {
                 drop(tree);
