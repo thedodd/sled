@@ -233,4 +233,11 @@ impl Db {
     pub fn generate_id(&self) -> Result<u64> {
         self.context.generate_id()
     }
+
+    /// Intentionally don't write any buffered data when
+    /// dropping.
+    #[doc(hidden)]
+    pub fn simulate_crash_on_drop(&self) {
+        self.context.pagecache.set_failpoint(Error::Failpoint);
+    }
 }
