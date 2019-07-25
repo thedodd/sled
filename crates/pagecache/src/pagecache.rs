@@ -8,13 +8,13 @@ use std::{
 
 use super::*;
 
-type PagePtrInner<'g, P> = Shared<'g, Node<(Option<Update<P>>, CacheInfo)>>;
+type PagePtrInner<'g, P> = Shared<'g, Node<(AtomicUpdate<P>, CacheInfo)>>;
 
 /// A pointer to shared lock-free state bound by a pinned epoch's lifetime.
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub struct PagePtr<'g, P>
 where
-    P: 'static + Send,
+    P: 'static + Send + Sync,
 {
     cached_ptr: PagePtrInner<'g, P>,
     ts: u64,
@@ -22,7 +22,7 @@ where
 
 impl<'g, P> PagePtr<'g, P>
 where
-    P: 'static + Send,
+    P: 'static + Send + Sync,
 {
     /// The last Lsn number for the head of this page
     pub fn last_lsn(&self) -> Lsn {
@@ -30,7 +30,7 @@ where
     }
 }
 
-unsafe impl<'g, P> Send for PagePtr<'g, P> where P: Send {}
+unsafe impl<'g, P> Send for PagePtr<'g, P> where P: Send + Sync {}
 unsafe impl<'g, P> Sync for PagePtr<'g, P> where P: Send + Sync {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,9 +216,23 @@ struct PageTableEntry<P>
 where
     P: 'static + Send + Sync + Serialize + DeserializeOwned,
 {
-    stack: Stack<(Option<Update<P>>, CacheInfo)>,
+    stack: Stack<(AtomicUpdate<P>, CacheInfo)>,
     rts: AtomicLsn,
     pending: AtomicLsn,
+}
+
+#[derive(Clone)]
+struct AtomicUpdate<P>(Atomic<Update<P>>);
+
+impl<P> AtomicUpdate<P> {
+    fn as_option<'a>(&self, guard: &'a Guard) -> Option<&'a Update<P>> {
+        let ptr = self.0.load_consume(guard);
+        if ptr.as_raw().is_null() {
+            None
+        } else {
+            Some(ptr.deref())
+        }
+    }
 }
 
 unsafe impl<PM, P> Send for PageCache<PM, P>
@@ -546,7 +560,9 @@ where
 
             let mut stack_iter = StackIter::from_ptr(head, &tx.guard);
 
-            match stack_iter.next() {
+            match stack_iter.next().map(|(update, cache_info)| {
+                (update.as_option(&tx.guard), cache_info)
+            }) {
                 Some((Some(Update::Free), cache_info)) => (
                     pid,
                     PagePtr {
@@ -987,7 +1003,9 @@ where
                         let mut stack_iter =
                             StackIter::from_ptr(head, &tx.guard);
 
-                        match stack_iter.next() {
+                        match stack_iter.next().map(|(update, cache_info)| {
+                            (update.as_option(&tx.guard), cache_info)
+                        }) {
                             Some((Some(Update::Free), cache_info)) => (
                                 PagePtr {
                                     cached_ptr: head,
@@ -1369,37 +1387,44 @@ where
             return Ok(None);
         }
 
-        if let (Some(Update::Compact(compact)), cache_info) = entries[0] {
+        let first = entries[0].0.as_option(&tx.guard);
+
+        if let Some(Update::Compact(compact)) = first {
             // short circuit
 
             return Ok(Some((
                 PagePtr {
                     cached_ptr: head,
-                    ts: cache_info.ts,
+                    ts: entries[0].1.ts,
                 },
                 vec![compact],
             )));
         }
 
         let mut pulled_from_disk = false;
-        let pulled = entries.iter().map(|entry| match entry {
-            (Some(Update::Compact(compact)), cache_info) => {
-                Ok((Cow::Borrowed(compact), *cache_info))
-            }
-            (Some(Update::Append(compact)), cache_info) => {
-                Ok((Cow::Borrowed(compact), *cache_info))
-            }
-            (None, cache_info) => {
-                pulled_from_disk = true;
-                let res = self
-                    .pull(pid, cache_info.lsn, cache_info.ptr)
-                    .map(|pg| pg)?;
-                Ok((Cow::Owned(res.into_frag()), *cache_info))
-            }
-            other => {
-                panic!("iterating over unexpected update: {:?}", other);
-            }
-        });
+        let pulled = entries
+            .iter()
+            .map(|(update, cache_info)| {
+                (update.as_option(&tx.guard), cache_info)
+            })
+            .map(|entry| match entry {
+                (Some(Update::Compact(compact)), cache_info) => {
+                    Ok((Cow::Borrowed(compact), *cache_info))
+                }
+                (Some(Update::Append(compact)), cache_info) => {
+                    Ok((Cow::Borrowed(compact), *cache_info))
+                }
+                (None, cache_info) => {
+                    pulled_from_disk = true;
+                    let res = self
+                        .pull(pid, cache_info.lsn, cache_info.ptr)
+                        .map(|pg| pg)?;
+                    Ok((Cow::Owned(res.into_frag()), *cache_info))
+                }
+                other => {
+                    panic!("iterating over unexpected update: {:?}", other);
+                }
+            });
 
         // if any of our pulls failed, bail here
         let mut successes: Vec<(Cow<P>, CacheInfo)> = match pulled.collect() {
