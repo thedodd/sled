@@ -257,13 +257,14 @@ impl From<MessageKind> for LogKind {
     }
 }
 
-pub(crate) fn crc32(buf: &[u8]) -> u32 {
+/// calculates a crc32 from a slice. may use SIMD.
+pub fn crc32(buf: &[u8]) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&buf);
     hasher.finalize()
 }
 
-use self::debug::debug_delay;
+pub use self::debug::debug_delay;
 
 pub use crossbeam_epoch::{
     pin, unprotected, Atomic, Collector, CompareAndSetError, Guard,
