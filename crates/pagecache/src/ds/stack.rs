@@ -1,13 +1,10 @@
 use std::{
     fmt::{self, Debug},
     ops::Deref,
-    sync::atomic::Ordering::{Acquire, Release, AcqRel, Relaxed},
+    sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 
-use crossbeam_epoch::{
-    unprotected, Atomic, Guard,
-    Owned, Shared,
-};
+use crossbeam_epoch::{unprotected, Atomic, Guard, Owned, Shared};
 
 use crate::debug::debug_delay;
 
@@ -120,7 +117,7 @@ impl<T: Clone + Send + Sync + 'static> Stack<T> {
     }
 
     /// Pop the next item off the stack. Returns None if nothing is there.
-    fn _pop(&self, guard: &Guard) -> Option<T> {
+    pub fn pop(&self, guard: &Guard) -> Option<T> {
         use std::ptr;
         debug_delay();
         let mut head = self.head(&guard);
@@ -295,13 +292,13 @@ where
 
 #[test]
 fn basic_functionality() {
+    use crossbeam_epoch::pin;
     use std::sync::Arc;
     use std::thread;
-    use crossbeam_epoch::pin;
 
     let guard = pin();
     let ll = Arc::new(Stack::default());
-    assert_eq!(ll._pop(&guard), None);
+    assert_eq!(ll.pop(&guard), None);
     ll.push(1);
     let ll2 = Arc::clone(&ll);
     let t = thread::spawn(move || {
@@ -311,20 +308,20 @@ fn basic_functionality() {
     });
     t.join().unwrap();
     ll.push(5);
-    assert_eq!(ll._pop(&guard), Some(5));
-    assert_eq!(ll._pop(&guard), Some(4));
+    assert_eq!(ll.pop(&guard), Some(5));
+    assert_eq!(ll.pop(&guard), Some(4));
     let ll3 = Arc::clone(&ll);
     let t = thread::spawn(move || {
         let guard = pin();
-        assert_eq!(ll3._pop(&guard), Some(3));
-        assert_eq!(ll3._pop(&guard), Some(2));
+        assert_eq!(ll3.pop(&guard), Some(3));
+        assert_eq!(ll3.pop(&guard), Some(2));
     });
     t.join().unwrap();
-    assert_eq!(ll._pop(&guard), Some(1));
+    assert_eq!(ll.pop(&guard), Some(1));
     let ll4 = Arc::clone(&ll);
     let t = thread::spawn(move || {
         let guard = pin();
-        assert_eq!(ll4._pop(&guard), None);
+        assert_eq!(ll4.pop(&guard), None);
     });
     t.join().unwrap();
 }
