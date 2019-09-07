@@ -24,6 +24,11 @@ where
     pub fn last_lsn(&self) -> Lsn {
         unsafe { self.cached_ptr.deref().deref().1.lsn }
     }
+
+    /// The logical timestamp of this page
+    pub fn ts(&self) -> u64 {
+        self.ts
+    }
 }
 
 unsafe impl<'g, P> Send for PagePtr<'g, P> where P: Send {}
