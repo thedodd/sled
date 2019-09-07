@@ -71,7 +71,7 @@ pub struct TransactionalTree<'a> {
     pub(super) tree: &'a Tree,
     pub(super) writes: RefCell<HashMap<IVec, Option<IVec>>>,
     pub(super) read_cache: RefCell<HashMap<IVec, Option<IVec>>>,
-    pub(super) locks: RefCell<Vec<parking_lot::RwLockWriteGuard<'a, ()>>>,
+    pub(super) locks: RefCell<Vec<concurrency_control::ExclusiveLock<'a>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,7 +158,7 @@ impl<'a> TransactionalTree<'a> {
 
     fn stage(&self) -> bool {
         let mut locks = self.locks.borrow_mut();
-        let guard = self.tree.concurrency_control.write();
+        let guard = self.tree.concurrency_control.pessimistic_exclusive_tree();
         locks.push(guard);
         true
     }

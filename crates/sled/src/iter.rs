@@ -88,22 +88,19 @@ impl<'a> Iterator for Iter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let _measure = Measure::new(&M.tree_scan);
-        let _ = self.tree.concurrency_control.read();
 
         // TODO evil lifetime hack, please kill
         let g_ptr = &self.guard as *const Guard;
         let guard = unsafe { &*g_ptr as &'a Guard };
 
-        let (mut pid, mut node) =
-            if let (true, Some((pid, node))) =
-                (self.going_forward, self.cached_node.take()) {
-                (pid, node)
-            } else {
-                let view = iter_try!(self
-                    .tree
-                    .node_for_key(self.low_key(), guard));
-                (view.pid, view.node)
-            };
+        let (mut pid, mut node) = if let (true, Some((pid, node))) =
+            (self.going_forward, self.cached_node.take())
+        {
+            (pid, node)
+        } else {
+            let view = iter_try!(self.tree.node_for_key(self.low_key(), guard));
+            (view.pid, view.node)
+        };
 
         for _ in 0..MAX_LOOPS {
             if self.bounds_collapsed() {
@@ -171,22 +168,20 @@ impl<'a> Iterator for Iter<'a> {
 impl<'a> DoubleEndedIterator for Iter<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let _measure = Measure::new(&M.tree_reverse_scan);
-        let _ = self.tree.concurrency_control.read();
 
         // TODO evil lifetime hack, please kill
         let g_ptr = &self.guard as *const Guard;
         let guard = unsafe { &*g_ptr as &'a Guard };
 
-        let (mut pid, mut node) =
-            if let (false, Some((pid, node))) =
-                (self.going_forward, self.cached_node.take()) {
-                (pid, node)
-            } else {
-                let view = iter_try!(self
-                    .tree
-                    .node_for_key(self.high_key(), guard));
-                (view.pid, view.node)
-            };
+        let (mut pid, mut node) = if let (false, Some((pid, node))) =
+            (self.going_forward, self.cached_node.take())
+        {
+            (pid, node)
+        } else {
+            let view =
+                iter_try!(self.tree.node_for_key(self.high_key(), guard));
+            (view.pid, view.node)
+        };
 
         for _ in 0..MAX_LOOPS {
             if self.bounds_collapsed() {

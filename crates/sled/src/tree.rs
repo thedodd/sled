@@ -71,7 +71,7 @@ pub struct Tree {
     pub(crate) context: Context,
     pub(crate) subscriptions: Arc<Subscriptions>,
     pub(crate) root: Arc<AtomicU64>,
-    pub(crate) concurrency_control: Arc<RwLock<()>>,
+    pub(crate) concurrency_control: Arc<ConcurrencyControl>,
     pub(crate) merge_operator: Arc<RwLock<Option<MergeOperator>>>,
 }
 
@@ -108,7 +108,7 @@ impl Tree {
         K: AsRef<[u8]>,
         IVec: From<V>,
     {
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.insert_inner(key, value)
     }
 
@@ -269,7 +269,9 @@ impl Tree {
     /// // now do exist.
     /// ```
     pub fn apply_batch(&self, batch: Batch) -> Result<()> {
-        let _ = self.concurrency_control.write();
+        let _ = self
+            .concurrency_control
+            .pessimistic_exclusive(batch.writes.iter().map(|kv| &**kv.0));
         self.apply_batch_inner(batch)
     }
 
@@ -303,7 +305,7 @@ impl Tree {
     /// assert_eq!(t.get(&[1]), Ok(None));
     /// ```
     pub fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<IVec>> {
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.get_inner(key)
     }
 
@@ -343,7 +345,7 @@ impl Tree {
     /// assert_eq!(t.remove(&[1]), Ok(None));
     /// ```
     pub fn remove<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<IVec>> {
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.remove_inner(key)
     }
 
@@ -433,7 +435,7 @@ impl Tree {
         trace!("casing key {:?}", key.as_ref());
         let _measure = Measure::new(&M.tree_cas);
 
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
 
         if self.context.read_only {
             return Err(Error::Unsupported(
@@ -739,7 +741,7 @@ impl Tree {
         K: AsRef<[u8]>,
     {
         let _measure = Measure::new(&M.tree_get);
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.range(..key).next_back().transpose()
     }
 
@@ -779,7 +781,7 @@ impl Tree {
         K: AsRef<[u8]>,
     {
         let _measure = Measure::new(&M.tree_get);
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.range((ops::Bound::Excluded(key), ops::Bound::Unbounded))
             .next()
             .transpose()
@@ -845,7 +847,7 @@ impl Tree {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let _ = self.concurrency_control.read();
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         self.merge_inner(key, value)
     }
 
@@ -867,6 +869,7 @@ impl Tree {
             ));
         }
 
+        let _ = self.concurrency_control.pessimistic_shared(key.as_ref());
         let merge_operator_opt = self.merge_operator.read();
 
         if merge_operator_opt.is_none() {

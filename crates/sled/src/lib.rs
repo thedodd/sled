@@ -82,6 +82,7 @@
 
 mod batch;
 mod binary_search;
+mod concurrency_control;
 mod context;
 mod data;
 mod db;
@@ -120,6 +121,7 @@ pub use {
 use {
     self::{
         binary_search::binary_search_lub,
+        concurrency_control::ConcurrencyControl,
         context::Context,
         data::Data,
         frag::Frag,
@@ -132,8 +134,8 @@ use {
     },
     log::{debug, error, trace},
     pagecache::{
-        debug::debug_delay, pin, threadpool, Materializer, Measure, PageCache,
-        PageId, RecoveryGuard, M,
+        crc32, debug::debug_delay, pin, threadpool, Materializer, Measure,
+        PageCache, PageId, RecoveryGuard, M,
     },
     serde::{Deserialize, Serialize},
 };

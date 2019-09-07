@@ -111,7 +111,7 @@ impl Db {
                 subscriptions: Arc::new(Subscriptions::default()),
                 context: context.clone(),
                 root: Arc::new(AtomicU64::new(root)),
-                concurrency_control: Arc::new(RwLock::new(())),
+                concurrency_control: Arc::new(ConcurrencyControl::default()),
                 merge_operator: Arc::new(RwLock::new(None)),
             };
             tenants.insert(id, Arc::new(tree));
@@ -144,9 +144,9 @@ impl Db {
 
         let tree =
             Arc::new(meta::open_tree(&self.context, name.to_vec(), &guard)?);
-      
+
         tenants.insert(name.to_vec(), tree.clone());
-      
+
         Ok(tree)
     }
 

@@ -23,7 +23,7 @@ pub(crate) fn open_tree<'a>(
                     context: context.clone(),
                     subscriptions: Arc::new(Subscriptions::default()),
                     root: Arc::new(AtomicU64::new(root_id)),
-                    concurrency_control: Arc::new(RwLock::new(())),
+                    concurrency_control: Arc::new(ConcurrencyControl::default()),
                     merge_operator: Arc::new(RwLock::new(None)),
                 });
             }
@@ -93,7 +93,7 @@ pub(crate) fn open_tree<'a>(
             subscriptions: Arc::new(Subscriptions::default()),
             context: context.clone(),
             root: Arc::new(AtomicU64::new(root_id)),
-            concurrency_control: Arc::new(RwLock::new(())),
+            concurrency_control: Arc::new(ConcurrencyControl::default()),
             merge_operator: Arc::new(RwLock::new(None)),
         });
     }
