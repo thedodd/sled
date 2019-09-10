@@ -115,6 +115,7 @@ impl Iterator for Iter {
                 {
                     view
                 } else {
+                    guard.repin();
                     iter_try!(self.tree.node_for_key(self.low_key(), &guard))
                 };
 
