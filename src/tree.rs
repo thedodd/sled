@@ -15,7 +15,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct View<'g> {
-    pub ptr: TreePtr<'g>,
+    pub ptr: TreePtr,
     pub pid: PageId,
     pub node: &'g Node,
     pub size: u64,
@@ -1730,7 +1730,7 @@ impl Tree {
         &self,
         parent_view: &View<'g>,
         child_pid: PageId,
-        mut parent_cas_key: TreePtr<'g>,
+        mut parent_cas_key: TreePtr,
         guard: &'g Guard,
     ) -> Result<bool> {
         loop {

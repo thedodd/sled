@@ -151,7 +151,7 @@ pub use {
                 MSG_HEADER_LEN, SEG_HEADER_LEN,
             },
             DiskPtr, Log, LogKind, LogOffset, LogRead, Lsn, PageCache, PageId,
-            SegmentMode,
+            SegmentMode, Version,
         },
         pagetable::PAGETABLE_NODE_SZ,
     },
@@ -186,7 +186,6 @@ use {
         oneshot::{OneShot, OneShotFiller},
         pagetable::PageTable,
         result::CasResult,
-        stack::{node_from_frag_vec, Stack, StackIter},
         subscription::Subscriptions,
         tree::TreeInner,
         vecset::VecSet,
@@ -218,7 +217,7 @@ fn crc32(buf: &[u8]) -> u32 {
     hasher.finalize()
 }
 
-type TreePtr<'g> = pagecache::PagePtr<'g>;
+type TreePtr = Version;
 
 #[cfg(any(test, feature = "lock_free_delays"))]
 mod debug_delay;

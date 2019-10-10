@@ -21,8 +21,11 @@ use std::{borrow::Cow, collections::BinaryHeap, ops::Deref};
 use self::{
     blob_io::{gc_blobs, read_blob, remove_blob, write_blob},
     constants::{
-        BATCH_MANIFEST_PID, CONFIG_PID, COUNTER_PID, META_PID,
-        PAGE_CONSOLIDATION_THRESHOLD,
+        BATCH_MANIFEST_PID,
+        CONFIG_PID,
+        COUNTER_PID,
+        META_PID,
+        //PAGE_CONSOLIDATION_THRESHOLD,
     },
     iobuf::{IoBuf, IoBufs},
     iterator::{raw_segment_iter_from, LogIter},
@@ -48,7 +51,15 @@ pub use self::{
     segment::SegmentMode,
 };
 
-/// The offset of a segment. This equals its LogOffset (or the offset of any
+use std::pin::Pin;
+use std::ptr::NonNull;
+
+use std::convert::{TryFrom, TryInto};
+
+#[cfg(feature = "compression")]
+use zstd::block::decompress;
+
+/// The offset of a segment. This equals iversion LogOffset (or the offset of any
 /// item contained inside it) divided by the configured segment_size.
 pub type SegmentId = usize;
 
@@ -63,6 +74,9 @@ pub type Lsn = i64;
 
 /// A page identifier.
 pub type PageId = u64;
+
+/// A logical version number.
+pub type Version = u64;
 
 /// A byte used to disambiguate log message types
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -207,11 +221,6 @@ fn bump_atomic_lsn(atomic_lsn: &AtomicLsn, to: Lsn) {
     }
 }
 
-use std::convert::{TryFrom, TryInto};
-
-#[cfg(feature = "compression")]
-use zstd::block::decompress;
-
 #[inline]
 pub(crate) fn u64_to_arr(number: u64) -> [u8; 8] {
     number.to_le_bytes()
@@ -266,35 +275,16 @@ pub(crate) fn maybe_decompress(buf: Vec<u8>) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-type PagePtrInner<'g> = Shared<'g, stack::Node<(Option<Update>, CacheInfo)>>;
-
-/// A pointer to shared lock-free state bound by a pinned epoch's lifetime.
-#[derive(Debug, Clone, PartialEq, Copy)]
-pub struct PagePtr<'g> {
-    cached_ptr: PagePtrInner<'g>,
-    ts: u64,
-}
-
-impl<'g> PagePtr<'g> {
-    /// The last Lsn number for the head of this page
-    pub fn last_lsn(&self) -> Lsn {
-        unsafe { self.cached_ptr.deref().deref().1.lsn }
-    }
-}
-
-unsafe impl<'g> Send for PagePtr<'g> {}
-unsafe impl<'g> Sync for PagePtr<'g> {}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheInfo {
-    pub ts: u64,
+    pub version: Version,
     pub lsn: Lsn,
     pub ptr: DiskPtr,
     pub log_size: usize,
 }
 
 /// Update<PageFragment> denotes a state or a change in a sequence of updates
-/// of which a page consists.
+/// of which a page consisversion.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Update {
     Append(Frag),
@@ -306,6 +296,20 @@ pub(crate) enum Update {
 }
 
 impl Update {
+    fn serialize(&self) -> (LogKind, Vec<u8>) {
+        let log_kind = log_kind_from_update(&self);
+        let serialize_latency = Measure::new(&M.serialize);
+        let bytes = match self {
+            Update::Counter(c) => serialize(&c).unwrap(),
+            Update::Meta(m) => serialize(&m).unwrap(),
+            Update::Config(c) => serialize(&c).unwrap(),
+            Update::Free => vec![],
+            other => serialize(other.as_frag()).unwrap(),
+        };
+
+        (log_kind, bytes)
+    }
+
     fn into_frag(self) -> Frag {
         match self {
             Update::Append(frag) | Update::Compact(frag) => frag,
@@ -342,7 +346,7 @@ impl Update {
 }
 
 /// Ensures that any operations that are written to disk between the
-/// creation of this guard and its destruction will be recovered
+/// creation of this guard and iversion destruction will be recovered
 /// atomically. When this guard is dropped, it marks in an earlier
 /// reservation where the stable tip must be in order to perform
 /// recovery. If this is beyond where the system successfully
@@ -368,26 +372,135 @@ impl<'a> RecoveryGuard<'a> {
     }
 }
 
-/// A lock-free pagecache which supports fragmented pages
+#[derive(Clone)]
+pub struct Page {
+    update: Option<Update>,
+    cache_infos: Vec<CacheInfo>,
+}
+
+pub struct PageCell {
+    inner: RwLock<Arc<Page>>,
+}
+
+impl PageCell {
+    pub fn new(inner: Page) -> PageCell {
+        PageCell { inner: RwLock::new(Arc::new(inner)) }
+    }
+
+    pub fn get(&self) -> Arc<Page> {
+        self.inner.read().clone()
+    }
+
+    pub fn get_view<F, V>(&self, f: F) -> View<V>
+    where
+        F: Fn(&Page) -> &V,
+    {
+        let get: Arc<Page> = self.get();
+
+        View::new(get, f)
+    }
+
+    pub fn with_mut<F, B>(&self, mut f: F) -> B
+    where
+        F: FnMut(&mut Page) -> B,
+    {
+        let mut inner = self.inner.write();
+        let mut_inner: &mut Page = Arc::make_mut(&mut *inner);
+        f(mut_inner)
+    }
+}
+
+pub struct View<V> {
+    inner: Pin<Arc<Page>>,
+    reference: NonNull<V>,
+}
+
+impl<V> View<V> {
+    pub fn new<F>(arc: Arc<Page>, f: F) -> View<V>
+    where
+        F: Fn(&Page) -> &V,
+    {
+        let pin = Pin::new(arc);
+        let reference: &Page = &pin;
+        let inner_reference: &V = f(reference);
+        let pointer = NonNull::from(inner_reference);
+
+        View { inner: pin, reference: pointer }
+    }
+}
+
+impl<V> Deref for View<V> {
+    type Target = V;
+
+    fn deref(&self) -> &V {
+        #[allow(unsafe_code)]
+        unsafe {
+            self.reference.as_ref()
+        }
+    }
+}
+
+impl PageTable<PageCell> {
+    pub fn link(
+        &self,
+        pid: PageId,
+        old_version: Version,
+        frag: Frag,
+        cache_info: CacheInfo,
+    ) -> std::result::Result<CacheInfo, (Option<Version>, Update)> {
+        unimplemented!()
+    }
+
+    pub fn replace(
+        &self,
+        pid: PageId,
+        old_version: Version,
+        new_base: Frag,
+        cache_info: CacheInfo,
+    ) -> std::result::Result<(Version, Vec<CacheInfo>), (Option<Version>, Update)>
+    {
+        /*
+        self.with_mut(move |page_state| {
+            let page_version = page_state.cache_infos.last().map(|ci| ci.version);
+
+            if page_version == old_version {
+                page_state.update = update;
+                let replaced = std::mem::replace(
+                    &mut page_state.cache_infos,
+                    vec![cache_info],
+                );
+
+                Ok((cache_info.version, replaced))
+            } else {
+                Err((page_version, update))
+            }
+        });
+        */
+        unimplemented!()
+    }
+
+    pub fn allocate(&self, pid: PageId, page: Page) {
+        let page_cell = PageCell::new(page);
+        self.insert(pid, page_cell);
+    }
+}
+
+/// A lock-free pagecache which supporversion fragmented pages
 /// for dramatically improving write throughput.
 pub struct PageCache {
     config: RunningConfig,
-    inner: PageTable<Page>,
+    inner: PageTable<PageCell>,
     next_pid_to_allocate: AtomicU64,
-    free: Arc<Mutex<BinaryHeap<PageId>>>,
+    free: Arc<Mutex<BinaryHeap<(PageId, Version)>>>,
     log: Log,
     lru: Lru,
     updates: AtomicU64,
     last_snapshot: Arc<Mutex<Option<Snapshot>>>,
     idgen: Arc<AtomicU64>,
-    idgen_persists: Arc<AtomicU64>,
+    idgen_persisversion: Arc<AtomicU64>,
     idgen_persist_mu: Arc<Mutex<()>>,
     was_recovered: bool,
 }
-
-/// A page consists of a sequence of state transformations
-/// with associated storage parameters like disk pos, lsn, time.
-type Page = Stack<(Option<Update>, CacheInfo)>;
 
 unsafe impl Send for PageCache {}
 
@@ -414,7 +527,7 @@ impl Drop for PageCache {
         trace!("dropping pagecache");
 
         // we can't as easily assert recovery
-        // invariants across failpoints for now
+        // invarianversion across failpoinversion for now
         if self.log.iobufs.config.global_error().is_ok() {
             let mut pages_before_restart = HashMap::new();
 
@@ -467,7 +580,7 @@ impl PageCache {
             last_snapshot: Arc::new(Mutex::new(Some(snapshot))),
             idgen_persist_mu: Arc::new(Mutex::new(())),
             idgen: Arc::new(AtomicU64::new(0)),
-            idgen_persists: Arc::new(AtomicU64::new(0)),
+            idgen_persisversion: Arc::new(AtomicU64::new(0)),
             was_recovered: false,
         };
 
@@ -569,11 +682,12 @@ impl PageCache {
             } else {
                 0
             };
-            let idgen_persists = counter / pc.config.idgen_persist_interval
+            let idgen_persisversion = counter
+                / pc.config.idgen_persist_interval
                 * pc.config.idgen_persist_interval;
 
             pc.idgen.store(idgen_recovery, Release);
-            pc.idgen_persists.store(idgen_persists, Release);
+            pc.idgen_persisversion.store(idgen_persisversion, Release);
         }
 
         pc.was_recovered = was_recovered;
@@ -600,16 +714,61 @@ impl PageCache {
         self.log.flush()
     }
 
-    /// Create a new page, trying to reuse old freed pages if possible
+    /// Create a new page, trying to reuse old_version freed pages if possible
     /// to maximize underlying `PageTable` pointer density. Returns
-    /// the page ID and its pointer for use in future atomic `replace`
+    /// the page ID and iversion pointer for use in future atomic `replace`
     /// and `link` operations.
     pub fn allocate<'g>(
         &self,
         new: Frag,
         guard: &'g Guard,
-    ) -> Result<(PageId, PagePtr<'g>)> {
+    ) -> Result<(PageId, Version)> {
         self.allocate_inner(Update::Compact(new), guard)
+    }
+
+    fn allocate_inner<'g>(
+        &self,
+        update: Update,
+        guard: &'g Guard,
+    ) -> Result<(PageId, Version)> {
+        let (log_kind, bytes) = update.serialize();
+
+        let (pid, old_version) =
+            if let Some((pid, old_version)) = self.free.lock().pop() {
+                trace!("re-allocating pid {}", pid);
+                (pid, Some(old_version))
+            } else {
+                let pid = self.next_pid_to_allocate.fetch_add(1, Relaxed);
+                trace!("allocating pid {} for the first time", pid);
+                (pid, None)
+            };
+
+        let log_reservation = self.log.reserve(log_kind, pid, &bytes)?;
+        let lsn = log_reservation.lsn();
+        let new_ptr = log_reservation.ptr();
+        let version = Version::try_from(lsn).unwrap();
+
+        let cache_info = CacheInfo {
+            version,
+            lsn,
+            ptr: new_ptr,
+            log_size: log_reservation.reservation_len(),
+        };
+
+        if let Some(old_version) = old_version {
+            self.inner
+                .replace(pid, old_version, update.into_frag(), cache_info)
+                .unwrap();
+        } else {
+            let page =
+                Page { update: Some(update), cache_infos: vec![cache_info] };
+
+            self.inner.allocate(pid, page);
+        };
+
+        log_reservation.complete()?;
+
+        Ok((pid, version))
     }
 
     /// Attempt to opportunistically rewrite data from a Draining
@@ -655,7 +814,7 @@ impl PageCache {
     }
 
     #[doc(hidden)]
-    #[cfg(feature = "failpoints")]
+    #[cfg(feature = "failpoinversion")]
     pub fn set_failpoint(&self, e: Error) {
         if let Error::FailPoint = e {
             self.config.set_global_error(e);
@@ -667,67 +826,11 @@ impl PageCache {
         }
     }
 
-    fn allocate_inner<'g>(
-        &self,
-        new: Update,
-        guard: &'g Guard,
-    ) -> Result<(PageId, PagePtr<'g>)> {
-        let (pid, key) = if let Some(pid) = self.free.lock().pop() {
-            trace!("re-allocating pid {}", pid);
-
-            let stack = match self.inner.get(pid) {
-                None => panic!(
-                    "expected to find existing stack \
-                     for re-allocated pid {}",
-                    pid
-                ),
-                Some(p) => p,
-            };
-
-            let head = stack.head(&guard);
-
-            let mut stack_iter = StackIter::from_ptr(head, &guard);
-
-            match stack_iter.next() {
-                Some((Some(Update::Free), cache_info)) => {
-                    (pid, PagePtr { cached_ptr: head, ts: cache_info.ts })
-                }
-                other => panic!(
-                    "failed to re-allocate pid {} which \
-                     contained unexpected state {:?}",
-                    pid, other
-                ),
-            }
-        } else {
-            let pid = self.next_pid_to_allocate.fetch_add(1, Relaxed);
-
-            trace!("allocating pid {} for the first time", pid);
-
-            let new_stack = Stack::default();
-
-            self.inner.insert(pid, new_stack);
-
-            (pid, PagePtr { cached_ptr: Shared::null(), ts: 0 })
-        };
-
-        let new_ptr =
-            self.cas_page(pid, key, new, false, guard)?.unwrap_or_else(|e| {
-                panic!(
-                    "should always be able to install \
-                     a new page during allocation, but \
-                     failed for pid {}: {:?}",
-                    pid, e
-                )
-            });
-
-        Ok((pid, new_ptr))
-    }
-
     /// Free a particular page.
     pub fn free<'g>(
         &self,
         pid: PageId,
-        old: PagePtr<'g>,
+        old_version: Version,
         guard: &'g Guard,
     ) -> Result<CasResult<'g, ()>> {
         trace!("attempting to free pid {}", pid);
@@ -737,7 +840,7 @@ impl PageCache {
             || pid == CONFIG_PID
             || pid == BATCH_MANIFEST_PID
         {
-            return Err(Error::Unsupported(
+            return Err(Error::ReportableBug(
                 "you are not able to free the first \
                  couple pages, which are allocated \
                  for system internal purposes"
@@ -745,61 +848,63 @@ impl PageCache {
             ));
         }
 
-        let new_ptr = self.cas_page(pid, old, Update::Free, false, guard)?;
+        let new_version =
+            self.cas_page(pid, old_version, Update::Free, false, guard)?;
 
-        if new_ptr.is_ok() {
+        if new_version.is_ok() {
             let free = self.free.clone();
             guard.defer(move || {
                 let mut free = free.lock();
                 // panic if we double-freed a page
-                if free.iter().any(|e| e == &pid) {
+                if free.iter().any(|e| e.0 == pid) {
                     panic!("pid {} was double-freed", pid);
                 }
 
-                free.push(pid);
+                free.push((pid, new_version.unwrap()));
             });
         }
 
-        Ok(new_ptr.map_err(|o| o.map(|(ptr, _)| (ptr, ()))))
+        Ok(new_version.map_err(|o| o.map(|(ptr, _)| (ptr, ()))))
     }
 
     /// Try to atomically add a `PageFrag` to the page.
     /// Returns `Ok(new_key)` if the operation was successful. Returns
-    /// `Err(None)` if the page no longer exists. Returns
+    /// `Err(None)` if the page no longer exisversion. Returns
     /// `Err(Some(actual_key))` if the atomic append fails.
     pub fn link<'g>(
         &'g self,
         pid: PageId,
-        mut old: PagePtr<'g>,
-        new: Frag,
+        old_version: Version,
+        frag: Frag,
         guard: &'g Guard,
     ) -> Result<CasResult<'g, Frag>> {
         let _measure = Measure::new(&M.link_page);
 
-        trace!("linking pid {} with {:?}", pid, new);
-        let stack = match self.inner.get(pid) {
+        trace!("linking pid {} with {:?}", pid, frag);
+
+        /*
+        let page_cell = match self.inner.get(pid) {
             None => return Ok(Err(None)),
             Some(p) => p,
         };
 
         // see if we should short-circuit replace
-        let head = stack.head(&guard);
-        let stack_iter = StackIter::from_ptr(head, &guard);
-        let stack_len = stack_iter.size_hint().1.unwrap();
-        if stack_len >= PAGE_CONSOLIDATION_THRESHOLD {
-            let current_frag =
-                if let Some((current_ptr, frag, _sz)) = self.get(pid, guard)? {
-                    if old.ts != current_ptr.ts {
-                        assert!(old.cached_ptr != current_ptr.cached_ptr);
-                        // the page has changed in the mean time,
-                        // and merging frags may violate correctness
-                        // invariants
-                        return Ok(Err(Some((current_ptr, new))));
-                    }
-                    frag
-                } else {
-                    return Ok(Err(None));
-                };
+        let (head, entries) = stack.head(&guard);
+        if entries.len() >= PAGE_CONSOLIDATION_THRESHOLD {
+            let current_frag = if let Some((current_ptr, frag, _sz)) =
+                self.get(pid, guard)?
+            {
+                if old_version.version != current_ptr.version {
+                    assert!(old_version.cached_ptr != current_ptr.cached_ptr);
+                    // the page has changed in the mean time,
+                    // and merging frags may violate correctness
+                    // invarianversion
+                    return Ok(Err(Some((current_ptr, new))));
+                }
+                frag
+            } else {
+                return Ok(Err(None));
+            };
 
             let update: Frag = {
                 let _measure = Measure::new(&M.merge_page);
@@ -809,150 +914,106 @@ impl PageCache {
                 update
             };
 
-            return self.replace(pid, old, update, guard);
+            return self.replace(pid, old_version, update, guard);
         }
+        */
 
-        let bytes = measure(&M.serialize, || serialize(&new).unwrap());
+        let bytes = measure(&M.serialize, || serialize(&frag).unwrap());
 
-        let mut new = {
-            let update = Update::Append(new);
+        let log_reservation = self.log.reserve(LogKind::Append, pid, &bytes)?;
+        let lsn = log_reservation.lsn();
+        let ptr = log_reservation.ptr();
 
-            let cache_info = CacheInfo {
-                lsn: -1,
-                ptr: DiskPtr::Inline(666_666_666),
-                ts: 0,
-                log_size: 0,
-            };
+        // NB the setting of the timestamp is quite
+        // correctness-critical! We use the version to
+        // ensure that fundamentally new data causes
+        // high-level link and replace operations
+        // to fail when the data in the pagecache
+        // actually changes. When we just rewrite
+        // the page for the purposes of moving it
+        // to a new location on disk, however, we
+        // don't want to cause threads that are
+        // basing the correctness of their new
+        // writes on the unchanged state to fail.
+        // Here, we bump it by 1, to signal that
+        // the underlying state is fundamentally
+        // changing.
+        let version = Version::try_from(lsn).unwrap();
 
-            let node = stack::Node {
-                inner: (Some(update), cache_info),
-                // NB this must be null
-                // to prevent double-frees
-                // if we encounter an IO error
-                // and fee our Owned version!
-                next: Atomic::null(),
-            };
-
-            Some(Owned::new(node))
+        let cache_info = CacheInfo {
+            lsn,
+            ptr,
+            version,
+            log_size: log_reservation.reservation_len(),
         };
 
-        loop {
-            let log_reservation =
-                self.log.reserve(LogKind::Append, pid, &bytes)?;
+        debug_delay();
+        let result = self.inner.link(pid, old_version, frag, cache_info);
 
-            let lsn = log_reservation.lsn();
-            let ptr = log_reservation.ptr();
+        match result {
+            Ok(last_cache_info_head) => {
+                trace!("link of pid {} succeeded", pid);
 
-            // NB the setting of the timestamp is quite
-            // correctness-critical! We use the ts to
-            // ensure that fundamentally new data causes
-            // high-level link and replace operations
-            // to fail when the data in the pagecache
-            // actually changes. When we just rewrite
-            // the page for the purposes of moving it
-            // to a new location on disk, however, we
-            // don't want to cause threads that are
-            // basing the correctness of their new
-            // writes on the unchanged state to fail.
-            // Here, we bump it by 1, to signal that
-            // the underlying state is fundamentally
-            // changing.
-            let ts = old.ts + 1;
+                // if the last update for this page was also
+                // sent to this segment, we can skip marking it
+                let previous_head_lsn = last_cache_info_head.lsn;
 
-            let mut node = new.take().unwrap();
+                assert_ne!(previous_head_lsn, 0);
 
-            let cache_info = CacheInfo {
-                lsn,
-                ptr,
-                ts,
-                log_size: log_reservation.reservation_len(),
-            };
+                let previous_lsn_segment =
+                    previous_head_lsn / self.config.segment_size as i64;
+                let new_lsn_segment = lsn / self.config.segment_size as i64;
 
-            if let (Some(Update::Append(_)), ref mut stored_cache_info) =
-                node.inner
-            {
-                *stored_cache_info = cache_info;
-            } else {
-                panic!("should only be working with Resident entries");
+                let to_clean = if previous_lsn_segment == new_lsn_segment {
+                    // can skip mark_link because we've
+                    // already accounted for this page
+                    // being resident on this segment
+                    self.log.with_sa(|sa| sa.clean(pid))
+                } else {
+                    self.log.with_sa(|sa| {
+                        sa.mark_link(pid, lsn, ptr);
+                        sa.clean(pid)
+                    })
+                };
+
+                // NB complete must happen AFTER calls to SA, because
+                // when the iobuf's n_writers hiversion 0, we may transition
+                // the segment to inactive, resulting in a race otherwise.
+                // FIXME can result in deadlock if a node that holds SA
+                // is waiting to acquire a new reservation blocked by this?
+                let _ptr = log_reservation.complete()?;
+
+                if let Some(to_clean) = to_clean {
+                    self.rewrite_page(to_clean, guard)?;
+                }
+
+                let count = self.updates.fetch_add(1, Relaxed) + 1;
+                let should_snapshot =
+                    count % self.config.snapshot_after_ops == 0;
+                if should_snapshot {
+                    self.advance_snapshot()?;
+                }
+
+                return Ok(Ok(version));
             }
-
-            debug_delay();
-            let result = stack.cap_node(old.cached_ptr, node, &guard);
-
-            match result {
-                Ok(cached_ptr) => {
-                    trace!("link of pid {} succeeded", pid);
-
-                    // if the last update for this page was also
-                    // sent to this segment, we can skip marking it
-                    let previous_head_lsn = old.last_lsn();
-
-                    assert_ne!(previous_head_lsn, 0);
-
-                    let previous_lsn_segment =
-                        previous_head_lsn / self.config.segment_size as i64;
-                    let new_lsn_segment = lsn / self.config.segment_size as i64;
-
-                    let to_clean = if previous_lsn_segment == new_lsn_segment {
-                        // can skip mark_link because we've
-                        // already accounted for this page
-                        // being resident on this segment
-                        self.log.with_sa(|sa| sa.clean(pid))
-                    } else {
-                        self.log.with_sa(|sa| {
-                            sa.mark_link(pid, lsn, ptr);
-                            sa.clean(pid)
-                        })
-                    };
-
-                    // NB complete must happen AFTER calls to SA, because
-                    // when the iobuf's n_writers hits 0, we may transition
-                    // the segment to inactive, resulting in a race otherwise.
-                    // FIXME can result in deadlock if a node that holds SA
-                    // is waiting to acquire a new reservation blocked by this?
-                    let _ptr = log_reservation.complete()?;
-
-                    if let Some(to_clean) = to_clean {
-                        self.rewrite_page(to_clean, guard)?;
-                    }
-
-                    let count = self.updates.fetch_add(1, Relaxed) + 1;
-                    let should_snapshot =
-                        count % self.config.snapshot_after_ops == 0;
-                    if should_snapshot {
-                        self.advance_snapshot()?;
-                    }
-
-                    return Ok(Ok(PagePtr { cached_ptr, ts }));
-                }
-                Err((actual_ptr, returned_new)) => {
-                    trace!("link of pid {} failed", pid);
-                    let _ptr = log_reservation.abort()?;
-                    let actual_ts = unsafe { actual_ptr.deref().1.ts };
-                    if actual_ts == old.ts {
-                        new = Some(returned_new);
-                        old = PagePtr { cached_ptr: actual_ptr, ts: actual_ts };
-                    } else {
-                        let returned_update = returned_new.0.clone().unwrap();
-                        let returned_frag = returned_update.into_frag();
-                        return Ok(Err(Some((
-                            PagePtr { cached_ptr: actual_ptr, ts: actual_ts },
-                            returned_frag,
-                        ))));
-                    }
-                }
+            Err((actual_version, returned_new)) => {
+                trace!("link of pid {} failed", pid);
+                let _ptr = log_reservation.abort()?;
+                assert_ne!(actual_version, old_version);
+                let returned_frag = returned_new.into_frag();
+                return Ok(Err(Some((actual_version, returned_frag))));
             }
         }
     }
 
     /// Replace an existing page with a different set of `PageFrag`s.
     /// Returns `Ok(new_key)` if the operation was successful. Returns
-    /// `Err(None)` if the page no longer exists. Returns
+    /// `Err(None)` if the page no longer exisversion. Returns
     /// `Err(Some(actual_key))` if the atomic swap fails.
     pub fn replace<'g>(
         &self,
         pid: PageId,
-        old: PagePtr<'g>,
+        old_version: Version,
         new: Frag,
         guard: &'g Guard,
     ) -> Result<CasResult<'g, Frag>> {
@@ -960,8 +1021,13 @@ impl PageCache {
 
         trace!("replacing pid {} with {:?}", pid, new);
 
-        let result =
-            self.cas_page(pid, old, Update::Compact(new), false, guard)?;
+        let result = self.cas_page(
+            pid,
+            old_version,
+            Update::Compact(new),
+            false,
+            guard,
+        )?;
 
         let to_clean = self.log.with_sa(|sa| sa.clean(pid));
 
@@ -988,7 +1054,7 @@ impl PageCache {
 
     // rewrite a page so we can reuse the segment that it is
     // (at least partially) located in. This happens when a
-    // segment has had enough resident page fragments moved
+    // segment has had enough resident page fragmenversion moved
     // away to trigger the `segment_cleanup_threshold`.
     fn rewrite_page(&self, pid: PageId, guard: &Guard) -> Result<()> {
         let _measure = Measure::new(&M.rewrite_page);
@@ -997,43 +1063,41 @@ impl PageCache {
 
         let stack = match self.inner.get(pid) {
             None => {
-                trace!("rewriting pid {} failed (no longer exists)", pid);
+                trace!("rewriting pid {} failed (no longer exisversion)", pid);
                 return Ok(());
             }
             Some(p) => p,
         };
 
         debug_delay();
-        let head = stack.head(&guard);
-        let stack_iter = StackIter::from_ptr(head, &guard);
-        let cache_entries: Vec<_> = stack_iter.collect();
+        let (head, entries) = stack.head(&guard);
 
         // if the page is just a single blob pointer, rewrite it.
-        if cache_entries.len() == 1 && cache_entries[0].1.ptr.is_blob() {
+        if entries.len() == 1 && entries[0].1.ptr.is_blob() {
             trace!("rewriting blob with pid {}", pid);
-            let blob_ptr = cache_entries[0].1.ptr.blob().1;
+            let blob_ptr = entries[0].1.ptr.blob().1;
 
             let log_reservation = self.log.rewrite_blob_ptr(pid, blob_ptr)?;
 
             let new_ptr = log_reservation.ptr();
-            let mut new_cache_entry = cache_entries[0].clone();
+            let mut new_cache_entry = entries[0].clone();
 
             new_cache_entry.1.ptr = new_ptr;
 
-            let node = node_from_frag_vec(vec![new_cache_entry]);
+            let node = vec![new_cache_entry];
 
             debug_delay();
             let result = stack.cas(head, node, &guard);
 
             if result.is_ok() {
-                let ptrs = ptrs_from_stack(head, guard);
+                let ptrs = ptrs_from_stack(entries, guard);
                 let lsn = log_reservation.lsn();
 
                 self.log
                     .with_sa(|sa| sa.mark_replace(pid, lsn, ptrs, new_ptr))?;
 
                 // NB complete must happen AFTER calls to SA, because
-                // when the iobuf's n_writers hits 0, we may transition
+                // when the iobuf's n_writers hiversion 0, we may transition
                 // the segment to inactive, resulting in a race otherwise.
                 let _ptr = log_reservation.complete()?;
 
@@ -1072,15 +1136,12 @@ impl PageCache {
                     Some(p) => p,
                 };
 
-                let head = stack.head(&guard);
+                let (head, cache_entries) = stack.head(&guard);
 
-                let mut stack_iter = StackIter::from_ptr(head, &guard);
-
-                match stack_iter.next() {
-                    Some((Some(Update::Free), cache_info)) => (
-                        PagePtr { cached_ptr: head, ts: cache_info.ts },
-                        Update::Free,
-                    ),
+                match cache_entries[0] {
+                    (Some(Update::Free), cache_info) => {
+                        (cache_info.version, Update::Free)
+                    }
                     other => {
                         debug!(
                             "when rewriting pid {} \
@@ -1150,123 +1211,87 @@ impl PageCache {
     fn cas_page<'g>(
         &self,
         pid: PageId,
-        mut old: PagePtr<'g>,
+        mut old_version: Version,
         update: Update,
         is_rewrite: bool,
         guard: &'g Guard,
     ) -> Result<CasResult<'g, Update>> {
         trace!(
-            "cas_page called on pid {} to {:?} with old ts {:?}",
+            "cas_page called on pid {} to {:?} with old_version version {:?}",
             pid,
             update,
-            old.ts
+            old_version.version
         );
-        let stack = match self.inner.get(pid) {
-            None => {
-                trace!("early-returning from cas_page, no stack found");
-                return Ok(Err(None));
+
+        let (log_kind, bytes) = update.serialize();
+
+        let log_reservation = self.log.reserve(log_kind, pid, &bytes)?;
+        let lsn = log_reservation.lsn();
+        let new_ptr = log_reservation.ptr();
+
+        // NB the setting of the timestamp is quite
+        // correctness-critical! We use the version to
+        // ensure that fundamentally new data causes
+        // high-level link and replace operations
+        // to fail when the data in the pagecache
+        // actually changes. When we just rewrite
+        // the page for the purposes of moving it
+        // to a new location on disk, however, we
+        // don't want to cause threads that are
+        // basing the correctness of their new
+        // writes on the unchanged state to fail.
+        // Here, we only bump it up by 1 if the
+        // update represenversion a fundamental change
+        // that SHOULD cause CAS failures.
+        // Here, we only bump it up by 1 if the
+        // update represenversion a fundamental change
+        // that SHOULD cause CAS failures.
+        let version = if is_rewrite { old_version } else { old_version + 1 };
+
+        let cache_info = CacheInfo {
+            version,
+            lsn,
+            ptr: new_ptr,
+            log_size: log_reservation.reservation_len(),
+        };
+
+        let page = Page { update: Some(update), cache_infos: vec![cache_info] };
+
+        debug_delay();
+        let result = self.inner.replace(old_version, page);
+
+        match result {
+            Ok((new_version, old_pointers)) => {
+                trace!("cas_page succeeded on pid {}", pid);
+                self.log.with_sa(|sa| {
+                    sa.mark_replace(pid, lsn, old_pointers, new_ptr)
+                })?;
+
+                // NB complete must happen AFTER calls to SA, because
+                // when the iobuf's n_writers hiversion 0, we may transition
+                // the segment to inactive, resulting in a race otherwise.
+                let _ptr = log_reservation.complete()?;
+                return Ok(Ok(version));
             }
-            Some(p) => p,
-        };
+            Err((actual_version, returned_entry)) => {
+                trace!("cas_page failed on pid {}", pid);
+                let _ptr = log_reservation.abort()?;
 
-        let log_kind = log_kind_from_update(&update);
-        let serialize_latency = Measure::new(&M.serialize);
-        let bytes = match &update {
-            Update::Counter(c) => serialize(&c).unwrap(),
-            Update::Meta(m) => serialize(&m).unwrap(),
-            Update::Config(c) => serialize(&c).unwrap(),
-            Update::Free => vec![],
-            other => serialize(other.as_frag()).unwrap(),
-        };
-        drop(serialize_latency);
-        let mut update_opt = Some(update);
+                let returned_update =
+                    returned_entry.into_box().inner.0.take().unwrap();
 
-        loop {
-            let log_reservation = self.log.reserve(log_kind, pid, &bytes)?;
-            let lsn = log_reservation.lsn();
-            let new_ptr = log_reservation.ptr();
+                assert_ne!(old_version, actual_version);
 
-            // NB the setting of the timestamp is quite
-            // correctness-critical! We use the ts to
-            // ensure that fundamentally new data causes
-            // high-level link and replace operations
-            // to fail when the data in the pagecache
-            // actually changes. When we just rewrite
-            // the page for the purposes of moving it
-            // to a new location on disk, however, we
-            // don't want to cause threads that are
-            // basing the correctness of their new
-            // writes on the unchanged state to fail.
-            // Here, we only bump it up by 1 if the
-            // update represents a fundamental change
-            // that SHOULD cause CAS failures.
-            // Here, we only bump it up by 1 if the
-            // update represents a fundamental change
-            // that SHOULD cause CAS failures.
-            let ts = if is_rewrite { old.ts } else { old.ts + 1 };
-
-            let cache_info = CacheInfo {
-                ts,
-                lsn,
-                ptr: new_ptr,
-                log_size: log_reservation.reservation_len(),
-            };
-
-            let node = node_from_frag_vec(vec![(
-                Some(update_opt.take().unwrap()),
-                cache_info,
-            )]);
-
-            debug_delay();
-            let result = stack.cas(old.cached_ptr, node, &guard);
-
-            match result {
-                Ok(cached_ptr) => {
-                    trace!("cas_page succeeded on pid {}", pid);
-                    let pointers = ptrs_from_stack(old.cached_ptr, guard);
-
-                    self.log.with_sa(|sa| {
-                        sa.mark_replace(pid, lsn, pointers, new_ptr)
-                    })?;
-
-                    // NB complete must happen AFTER calls to SA, because
-                    // when the iobuf's n_writers hits 0, we may transition
-                    // the segment to inactive, resulting in a race otherwise.
-                    let _ptr = log_reservation.complete()?;
-                    return Ok(Ok(PagePtr { cached_ptr, ts }));
-                }
-                Err((actual_ptr, returned_entry)) => {
-                    trace!("cas_page failed on pid {}", pid);
-                    let _ptr = log_reservation.abort()?;
-
-                    let returned_update =
-                        returned_entry.into_box().inner.0.take().unwrap();
-
-                    let actual_ts = unsafe { actual_ptr.deref().1.ts };
-
-                    if actual_ts != old.ts || is_rewrite {
-                        return Ok(Err(Some((
-                            PagePtr { cached_ptr: actual_ptr, ts: actual_ts },
-                            returned_update,
-                        ))));
-                    }
-                    trace!(
-                        "retrying CAS on pid {} with same ts of {}",
-                        pid,
-                        old.ts
-                    );
-                    old = PagePtr { cached_ptr: actual_ptr, ts: old.ts };
-                    update_opt = Some(returned_update);
-                }
-            } // match cas result
-        } // loop
+                return Ok(Err(Some((actual_version, returned_update))));
+            }
+        } // match cas result
     }
 
     /// Retrieve the current meta page
     pub(crate) fn get_meta<'g>(
         &self,
         guard: &'g Guard,
-    ) -> Result<(PagePtr<'g>, &'g Meta)> {
+    ) -> Result<(Version, &'g Meta)> {
         trace!("getting page iter for META");
 
         let stack = match self.inner.get(META_PID) {
@@ -1280,17 +1305,18 @@ impl PageCache {
             Some(p) => p,
         };
 
-        let head = stack.head(&guard);
+        let (head, entries) = stack.head(&guard);
 
-        match StackIter::from_ptr(head, &guard).next() {
+        match entries[0] {
             Some((Some(Update::Meta(m)), cache_info)) => {
-                Ok((PagePtr { cached_ptr: head, ts: cache_info.ts }, m))
+                Ok((cache_info.version, m))
             }
             Some((None, cache_info)) => {
                 let update =
                     self.pull(META_PID, cache_info.lsn, cache_info.ptr)?;
-                let ptr = PagePtr { cached_ptr: head, ts: cache_info.ts };
-                let _ = self.cas_page(META_PID, ptr, update, false, guard)?;
+                let version = cache_info.version;
+                let _ =
+                    self.cas_page(META_PID, version, update, false, guard)?;
                 self.get_meta(guard)
             }
             _ => Err(Error::ReportableBug(
@@ -1305,7 +1331,7 @@ impl PageCache {
     pub(crate) fn get_persisted_config<'g>(
         &self,
         guard: &'g Guard,
-    ) -> Result<(PagePtr<'g>, &'g PersistedConfig)> {
+    ) -> Result<(Version, &'g PersistedConfig)> {
         trace!("getting page iter for persisted config");
 
         let stack = match self.inner.get(CONFIG_PID) {
@@ -1319,17 +1345,18 @@ impl PageCache {
             Some(p) => p,
         };
 
-        let head = stack.head(&guard);
+        let (head, cache_entries) = stack.head(&guard);
 
-        match StackIter::from_ptr(head, &guard).next() {
+        match cache_entries[0] {
             Some((Some(Update::Config(config)), cache_info)) => {
-                Ok((PagePtr { cached_ptr: head, ts: cache_info.ts }, config))
+                Ok((cache_info.version, config))
             }
             Some((None, cache_info)) => {
                 let update =
                     self.pull(CONFIG_PID, cache_info.lsn, cache_info.ptr)?;
-                let ptr = PagePtr { cached_ptr: head, ts: cache_info.ts };
-                let _ = self.cas_page(CONFIG_PID, ptr, update, false, guard)?;
+                let version = cache_info.version;
+                let _ =
+                    self.cas_page(CONFIG_PID, version, update, false, guard)?;
                 self.get_persisted_config(guard)
             }
             _ => Err(Error::ReportableBug(
@@ -1344,7 +1371,7 @@ impl PageCache {
     pub(crate) fn get_idgen<'g>(
         &self,
         guard: &'g Guard,
-    ) -> Result<(PagePtr<'g>, u64)> {
+    ) -> Result<(Version, u64)> {
         trace!("getting page iter for idgen");
 
         let stack = match self.inner.get(COUNTER_PID) {
@@ -1358,18 +1385,18 @@ impl PageCache {
             Some(p) => p,
         };
 
-        let head = stack.head(&guard);
+        let (head, cache_entries) = stack.head(&guard);
 
-        match StackIter::from_ptr(head, &guard).next() {
+        match cache_entries[0] {
             Some((Some(Update::Counter(counter)), cache_info)) => {
-                Ok((PagePtr { cached_ptr: head, ts: cache_info.ts }, *counter))
+                Ok((cache_info.version, counter))
             }
             Some((None, cache_info)) => {
                 let update =
                     self.pull(COUNTER_PID, cache_info.lsn, cache_info.ptr)?;
-                let ptr = PagePtr { cached_ptr: head, ts: cache_info.ts };
+                let version = cache_info.version;
                 let _ =
-                    self.cas_page(COUNTER_PID, ptr, update, false, guard)?;
+                    self.cas_page(COUNTER_PID, version, update, false, guard)?;
                 self.get_idgen(guard)
             }
             _ => Err(Error::ReportableBug(
@@ -1380,12 +1407,12 @@ impl PageCache {
         }
     }
 
-    /// Try to retrieve a page by its logical ID.
+    /// Try to retrieve a page by iversion logical ID.
     pub fn get<'g>(
         &self,
         pid: PageId,
         guard: &'g Guard,
-    ) -> Result<Option<(PagePtr<'g>, &'g Frag, u64)>> {
+    ) -> Result<Option<(Version, &'g Frag, u64)>> {
         trace!("getting page iterator for pid {}", pid);
         let _measure = Measure::new(&M.get_page);
 
@@ -1408,9 +1435,7 @@ impl PageCache {
             Some(p) => p,
         };
 
-        let head = stack.head(&guard);
-
-        let entries: Vec<_> = StackIter::from_ptr(head, &guard).collect();
+        let (head, entries) = stack.head(&guard);
 
         let is_free = if let Some((Some(entry), _)) = entries.first() {
             entry.is_free()
@@ -1431,7 +1456,7 @@ impl PageCache {
             (Some(Update::Compact(compact)), cache_info) => {
                 // short circuit
                 return Ok(Some((
-                    PagePtr { cached_ptr: head, ts: cache_info.ts },
+                    cache_info.version,
                     compact,
                     total_page_size,
                 )));
@@ -1507,12 +1532,13 @@ impl PageCache {
 
         frags[0].0 = Some(Update::Compact(base));
 
-        let node = node_from_frag_vec(frags).into_shared(&guard);
+        let node = frags;
 
         #[cfg(feature = "event_log")]
-        assert_eq!(ptrs_from_stack(head, guard), ptrs_from_stack(node, guard),);
-
-        let node = unsafe { node.into_owned() };
+        assert_eq!(
+            ptrs_from_stack(entries, guard),
+            ptrs_from_stack(frags, guard),
+        );
 
         debug_delay();
         let res = stack.cas(head, node, &guard);
@@ -1535,9 +1561,9 @@ impl PageCache {
                 }
             };
 
-            let ptr = PagePtr { cached_ptr: new_ptr, ts: entries[0].1.ts };
+            let version = entries[0].1.version;
 
-            Ok(Some((ptr, page_ref, total_page_size)))
+            Ok(Some((version, page_ref, total_page_size)))
         } else {
             trace!("fix-up for pid {} failed", pid);
 
@@ -1566,7 +1592,7 @@ impl PageCache {
     /// is synced to disk periodically if the
     /// `sync_every_ms` configuration option
     /// is set to `Some(number_of_ms_between_syncs)`
-    /// or if the IO buffer gets filled to
+    /// or if the IO buffer geversion filled to
     /// capacity before being rotated.
     pub fn was_recovered(&self) -> bool {
         self.was_recovered
@@ -1584,23 +1610,25 @@ impl PageCache {
         let ret = self.idgen.fetch_add(1, Relaxed);
 
         let interval = self.config.idgen_persist_interval;
-        let necessary_persists = ret / interval * interval;
-        let mut persisted = self.idgen_persists.load(Acquire);
+        let necessary_persisversion = ret / interval * interval;
+        let mut persisted = self.idgen_persisversion.load(Acquire);
 
-        while persisted < necessary_persists {
+        while persisted < necessary_persisversion {
             let _mu = self.idgen_persist_mu.lock();
-            persisted = self.idgen_persists.load(Acquire);
-            if persisted < necessary_persists {
+            persisted = self.idgen_persisversion.load(Acquire);
+            if persisted < necessary_persisversion {
                 // it's our responsibility to persist up to our ID
                 let guard = pin();
                 let (key, current) = self.get_idgen(&guard)?;
 
                 assert_eq!(current, persisted);
 
-                let counter_update = Update::Counter(necessary_persists);
+                let counter_update = Update::Counter(necessary_persisversion);
 
-                let old = self.idgen_persists.swap(necessary_persists, Release);
-                assert_eq!(old, persisted);
+                let old_version = self
+                    .idgen_persisversion
+                    .swap(necessary_persisversion, Release);
+                assert_eq!(old_version, persisted);
 
                 if self
                     .cas_page(
@@ -1618,7 +1646,7 @@ impl PageCache {
 
                 // during recovery we add 2x the interval. we only
                 // need to block if the last one wasn't stable yet.
-                let gap = (necessary_persists - persisted) / interval;
+                let gap = (necessary_persisversion - persisted) / interval;
                 if gap > 1 {
                     // this is the most pessimistic case, hopefully
                     // we only ever hit this on the first ID generation
@@ -1644,7 +1672,7 @@ impl PageCache {
     /// Look up a PageId for a given identifier in the `Meta`
     /// mapping. This is pretty cheap, but in some cases
     /// you may prefer to maintain your own atomic references
-    /// to collection roots instead of relying on this. See
+    /// to collection rooversion instead of relying on this. See
     /// sled's `Tree` root tracking for an example of
     /// avoiding this in a lock-free way that handles
     /// various race conditions.
@@ -1666,7 +1694,7 @@ impl PageCache {
     pub fn cas_root_in_meta<'g>(
         &self,
         name: &[u8],
-        old: Option<PageId>,
+        old_version: Option<PageId>,
         new: Option<PageId>,
         guard: &'g Guard,
     ) -> Result<std::result::Result<(), Option<PageId>>> {
@@ -1674,7 +1702,7 @@ impl PageCache {
             let (meta_key, meta) = self.get_meta(guard)?;
 
             let actual = meta.get_root(&name);
-            if actual != old {
+            if actual != old_version {
                 return Ok(Err(actual));
             }
 
@@ -1701,7 +1729,7 @@ impl PageCache {
                 Err(None) => {
                     return Err(Error::ReportableBug(
                         "replacing the META page has failed because \
-                         the pagecache does not think it currently exists."
+                         the pagecache does not think it currently exisversion."
                             .into(),
                     ));
                 }
@@ -1727,12 +1755,10 @@ impl PageCache {
             };
 
             debug_delay();
-            let head = stack.head(&guard);
-            let stack_iter = StackIter::from_ptr(head, &guard);
-            let stack_len = stack_iter.size_hint().1.unwrap();
-            let mut new_stack = Vec::with_capacity(stack_len);
+            let (head, entries) = stack.head(&guard);
+            let mut new_stack = Vec::with_capacity(entries.len());
 
-            for (update_opt, cache_info) in stack_iter {
+            for (update_opt, cache_info) in entries.iter() {
                 match update_opt {
                     None | Some(Update::Free) => {
                         // already paged out
@@ -1744,10 +1770,8 @@ impl PageCache {
                 }
             }
 
-            let node = node_from_frag_vec(new_stack);
-
             debug_delay();
-            let result = stack.cas(head, node, &guard);
+            let result = stack.cas(head, new_stack, &guard);
             if result.is_ok() {
                 // TODO record cache difference
             } else {
@@ -1957,47 +1981,56 @@ impl PageCache {
 
             trace!("load_snapshot pid {} {:?}", pid, state);
 
-            let stack = Stack::default();
-
             let guard = pin();
 
-            match *state {
+            let (update, cache_infos) = match *state {
                 PageState::Present(ref ptrs) => {
-                    for &(lsn, ptr, sz) in ptrs {
-                        let cache_info =
-                            CacheInfo { lsn, ptr, log_size: sz, ts: 0 };
+                    let cache_infos = ptrs
+                        .iter()
+                        .map(|&(lsn, ptr, sz)| {
+                            let version = u64::try_from(lsn).unwrap();
+                            CacheInfo {
+                                lsn,
+                                ptr,
+                                log_size: sz,
+                                version: version,
+                            }
+                        })
+                        .collect();
 
-                        stack.push((None, cache_info), &guard);
-                    }
+                    (None, cache_infos)
                 }
                 PageState::Free(lsn, ptr) => {
                     // blow away any existing state
                     trace!("load_snapshot freeing pid {}", pid);
-                    let cache_info =
-                        CacheInfo { lsn, ptr, log_size: MSG_HEADER_LEN, ts: 0 };
-                    stack.push((Some(Update::Free), cache_info), &guard);
-                    self.free.lock().push(pid);
-                }
-            }
+                    let version = u64::try_from(lsn).unwrap();
+                    let cache_info = CacheInfo {
+                        lsn,
+                        ptr,
+                        log_size: MSG_HEADER_LEN,
+                        version: version,
+                    };
 
-            // Set up new stack
+                    self.free.lock().push((pid, version));
+                    (Some(Update::Free), vec![cache_info])
+                }
+            };
+
+            let page = Page { update, cache_infos };
 
             trace!("installing stack for pid {}", pid);
 
-            self.inner.insert(pid, stack);
+            self.inner.allocate(pid, page);
         }
     }
 }
 
 fn ptrs_from_stack<'g>(
-    head_ptr: PagePtrInner<'g>,
+    stack: &Vec<(Option<Frag>, CacheInfo)>,
     guard: &'g Guard,
 ) -> Vec<DiskPtr> {
-    // generate a list of the old log ID's
-    let stack_iter = StackIter::from_ptr(head_ptr, &guard);
-
     let mut ptrs = vec![];
-    for (_, cache_info) in stack_iter {
+    for (_, cache_info) in stack {
         ptrs.push(cache_info.ptr);
     }
     ptrs

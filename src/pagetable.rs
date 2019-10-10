@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use crate::debug_delay;
+use crate::{debug_delay, PageId};
 
 #[allow(unused)]
 #[doc(hidden)]
@@ -20,8 +20,6 @@ pub const PAGETABLE_NODE_SZ: usize = size_of::<Node1<()>>();
 const FAN_FACTOR: u64 = 18;
 const FAN_OUT: u64 = 1 << FAN_FACTOR;
 const FAN_MASK: u64 = FAN_OUT - 1;
-
-pub type PageId = u64;
 
 struct Node1<T: Send + 'static> {
     children: [AtomicPtr<Node2<T>>; FAN_OUT as usize],

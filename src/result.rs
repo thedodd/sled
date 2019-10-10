@@ -5,7 +5,7 @@ use std::{
     io,
 };
 
-use crate::pagecache::{DiskPtr, PagePtr};
+use crate::pagecache::{DiskPtr, Version};
 
 /// The top-level result type for dealing with
 /// the `PageCache`.
@@ -15,8 +15,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// the new `PagePtr` will be returned as `Ok`.  Otherwise,
 /// the `Err` will contain a tuple of the current `PagePtr`
 /// and the old value that could not be set atomically.
-pub type CasResult<'a, R> =
-    std::result::Result<PagePtr<'a>, Option<(PagePtr<'a>, R)>>;
+pub type CasResult<'a, R> = std::result::Result<Version, Option<(Version, R)>>;
 
 /// An Error type encapsulating various issues that may come up
 /// in both the expected and unexpected operation of a `PageCache`.
