@@ -1,6 +1,5 @@
 //! `pagecache` is a lock-free pagecache and log for building high-performance
 //! databases.
-#![allow(unsafe_code)]
 
 pub mod constants;
 pub mod logger;
@@ -447,7 +446,7 @@ impl PageTable<PageCell> {
         old_version: Version,
         frag: Frag,
         cache_info: CacheInfo,
-    ) -> std::result::Result<CacheInfo, (Option<Version>, Update)> {
+    ) -> std::result::Result<CacheInfo, (Option<Version>, Frag)> {
         unimplemented!()
     }
 
@@ -455,7 +454,7 @@ impl PageTable<PageCell> {
         &self,
         pid: PageId,
         old_version: Version,
-        new_base: Frag,
+        new_base: Update,
         cache_info: CacheInfo,
     ) -> std::result::Result<(Version, Vec<CacheInfo>), (Option<Version>, Update)>
     {
@@ -502,8 +501,10 @@ pub struct PageCache {
     was_recovered: bool,
 }
 
+#[allow(unsafe_code)]
 unsafe impl Send for PageCache {}
 
+#[allow(unsafe_code)]
 unsafe impl Sync for PageCache {}
 
 impl Debug for PageCache {
@@ -756,9 +757,7 @@ impl PageCache {
         };
 
         if let Some(old_version) = old_version {
-            self.inner
-                .replace(pid, old_version, update.into_frag(), cache_info)
-                .unwrap();
+            self.inner.replace(pid, old_version, update, cache_info).unwrap();
         } else {
             let page =
                 Page { update: Some(update), cache_infos: vec![cache_info] };
@@ -996,12 +995,11 @@ impl PageCache {
 
                 return Ok(Ok(version));
             }
-            Err((actual_version, returned_new)) => {
+            Err((actual_version, returned_update)) => {
                 trace!("link of pid {} failed", pid);
                 let _ptr = log_reservation.abort()?;
-                assert_ne!(actual_version, old_version);
-                let returned_frag = returned_new.into_frag();
-                return Ok(Err(Some((actual_version, returned_frag))));
+                assert_ne!(actual_version, Some(old_version));
+                return Ok(Err((actual_version, returned_update)));
             }
         }
     }
@@ -1042,14 +1040,7 @@ impl PageCache {
             self.advance_snapshot()?;
         }
 
-        Ok(result.map_err(|fail| {
-            let (ptr, shared) = fail.unwrap();
-            if let Update::Compact(rejected_new) = shared {
-                Some((ptr, rejected_new))
-            } else {
-                unreachable!();
-            }
-        }))
+        Ok(result.map_err(|(version, update)| (version, update.into_frag())))
     }
 
     // rewrite a page so we can reuse the segment that it is
@@ -1220,7 +1211,7 @@ impl PageCache {
             "cas_page called on pid {} to {:?} with old_version version {:?}",
             pid,
             update,
-            old_version.version
+            old_version
         );
 
         let (log_kind, bytes) = update.serialize();
@@ -1255,14 +1246,15 @@ impl PageCache {
             log_size: log_reservation.reservation_len(),
         };
 
-        let page = Page { update: Some(update), cache_infos: vec![cache_info] };
-
         debug_delay();
-        let result = self.inner.replace(old_version, page);
+        let result = self.inner.replace(pid, old_version, update, cache_info);
 
         match result {
-            Ok((new_version, old_pointers)) => {
+            Ok((new_version, old_cache_infos)) => {
                 trace!("cas_page succeeded on pid {}", pid);
+                let old_pointers =
+                    old_cache_infos.iter().map(|ci| ci.ptr).collect();
+
                 self.log.with_sa(|sa| {
                     sa.mark_replace(pid, lsn, old_pointers, new_ptr)
                 })?;
@@ -1552,6 +1544,7 @@ impl PageCache {
                 self.page_out(to_evict, guard)?;
             }
 
+            #[allow(unsafe_code)]
             let page_ref = unsafe {
                 let item = &new_ptr.deref().inner;
                 if let (Some(Update::Compact(compact)), _) = item {
