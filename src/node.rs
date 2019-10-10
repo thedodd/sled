@@ -98,16 +98,16 @@ impl Node {
     pub(crate) fn parent_split(&mut self, at: &[u8], to: PageId) -> bool {
         if let Data::Index(ref mut ptrs) = self.data {
             let encoded_sep = &at[self.prefix_len as usize..];
-            match ptrs.binary_search_by_key(&encoded_sep, |(k, _)| k) {
-                Ok(_) => {
-                    debug!(
-                        "parent_split skipped because \
-                         parent already contains child at split point \
-                         due to deep race"
-                    );
-                    return false;
-                }
-                Err(idx) => ptrs.insert(idx, (IVec::from(encoded_sep), to)),
+            let encoded_key = IVec::from(encoded_sep);
+            if ptrs.contains_key(&encoded_key) {
+                debug!(
+                    "parent_split skipped because \
+                     parent already contains child at split point \
+                     due to deep race"
+                );
+                return false;
+            } else {
+                ptrs.insert(encoded_key, to);
             }
         } else {
             panic!("tried to attach a ParentSplit to a Leaf chain");
@@ -190,9 +190,17 @@ impl Node {
         let rhs_max = &self.hi[self.prefix_len as usize..];
         let (split, rhs_additional_prefix_len, right_data) = match self.data {
             Data::Index(ref mut ptrs) => {
+                let taken = std::mem::replace(ptrs, BTreeMap::new());
+
+                let mut items: Vec<(IVec, PageId)> =
+                    taken.into_iter().collect();
+
                 let (split, prefix_len, rhs) =
-                    split_inner(ptrs, prefix, rhs_max, false);
-                (split, prefix_len, Data::Index(rhs))
+                    split_inner(&mut items, prefix, rhs_max, false);
+
+                *ptrs = items.into_iter().collect::<BTreeMap<_, _>>();
+
+                (split, prefix_len, Data::Index(rhs.into_iter().collect()))
             }
             Data::Leaf(ref mut items) => {
                 let (split, prefix_len, rhs) =
@@ -267,13 +275,18 @@ impl Node {
             .count();
 
         match (&mut merged.data, &rhs.data) {
-            (Data::Index(ref mut lh_ptrs), Data::Index(ref rh_ptrs)) => {
-                receive_merge_inner(
-                    rhs.prefix(),
-                    new_prefix_len,
-                    lh_ptrs,
-                    rh_ptrs.as_ref(),
-                );
+            (Data::Index(ref mut lhs_ptrs), Data::Index(ref rhs_ptrs)) => {
+                // When merging, the prefix can only shrink or
+                // stay the same length. Here we figure out if
+                // we need to add previous prefixed bytes.
+                for (k, v) in rhs_ptrs {
+                    let k = if new_prefix_len != rhs.prefix().len() {
+                        prefix::reencode(rhs.prefix(), k, new_prefix_len)
+                    } else {
+                        k.clone()
+                    };
+                    lhs_ptrs.insert(k, v.clone());
+                }
             }
             (Data::Leaf(ref mut lh_items), Data::Leaf(ref rh_items)) => {
                 receive_merge_inner(
@@ -464,7 +477,7 @@ impl Node {
         let threshold = if cfg!(any(test, feature = "lock_free_delays")) {
             2
         } else if self.data.is_index() {
-            256
+            1024
         } else {
             16
         };
@@ -494,23 +507,32 @@ impl Node {
         self.merging_child.is_none() && !self.merging
     }
 
-    pub(crate) fn index_next_node(&self, key: &[u8]) -> (usize, PageId) {
+    // returns whether the next node is the left-most child
+    // as well as the associated pid
+    pub(crate) fn index_next_node(&self, key: &[u8]) -> (bool, PageId) {
         let records =
             self.data.index_ref().expect("index_next_node called on leaf");
 
         let suffix = &key[self.prefix_len as usize..];
 
-        let search = interpolation_search_lub(suffix, records);
+        use std::ops::{Bound, RangeToInclusive};
+        let range = RangeToInclusive { end: suffix };
 
-        let index = search.expect("failed to traverse index");
+        let search = records
+            .range(range)
+            .rev()
+            .nth(0)
+            .expect("failed to traverse index");
 
-        (index, records[index].1)
+        let leftmost_child = records.iter().nth(0).unwrap().1 == search.1;
+
+        (leftmost_child, *search.1)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Data {
-    Index(Vec<(IVec, PageId)>),
+    Index(BTreeMap<IVec, PageId>),
     Leaf(Vec<(IVec, IVec)>),
 }
 
@@ -531,11 +553,13 @@ impl Data {
     pub(crate) fn parent_merge_confirm(&mut self, merged_child_pid: PageId) {
         match self {
             Data::Index(ref mut ptrs) => {
-                let idx = ptrs
+                let key = ptrs
                     .iter()
-                    .position(|(_k, c)| *c == merged_child_pid)
-                    .unwrap();
-                let _ = ptrs.remove(idx);
+                    .filter(|(_k, c)| **c == merged_child_pid)
+                    .nth(0)
+                    .unwrap()
+                    .0;
+                ptrs.remove(key).unwrap();
             }
             _ => panic!("parent_merge_confirm called on leaf data"),
         }
@@ -548,7 +572,7 @@ impl Data {
         }
     }
 
-    pub(crate) fn index_ref(&self) -> Option<&Vec<(IVec, PageId)>> {
+    pub(crate) fn index_ref(&self) -> Option<&BTreeMap<IVec, PageId>> {
         match *self {
             Data::Index(ref ptrs) => Some(ptrs),
             Data::Leaf(_) => None,

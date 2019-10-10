@@ -95,13 +95,13 @@ macro_rules! maybe_fail {
 }
 
 mod batch;
-mod binary_search;
 mod config;
 mod context;
 mod db;
 mod dll;
 mod frag;
 mod histogram;
+mod interpolation_search;
 mod iter;
 mod ivec;
 mod lazy;
@@ -166,11 +166,11 @@ pub use self::{
 
 use {
     self::{
-        binary_search::interpolation_search_lub,
         config::PersistedConfig,
         context::Context,
         frag::Frag,
         histogram::Histogram,
+        //interpolation_search::interpolation_search_lub,
         lru::Lru,
         meta::Meta,
         metrics::{clock, measure, Measure, M},

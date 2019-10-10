@@ -76,8 +76,10 @@ pub(crate) fn open_tree(
         // set up root index
 
         // vec![0] represents a prefix-encoded empty prefix
-        let root_index_vec = vec![(prefix::empty().into(), leaf_id)];
-        let root = Frag::root(Data::Index(root_index_vec));
+        let root_index = vec![(prefix::empty().into(), leaf_id)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let root = Frag::root(Data::Index(root_index));
         let (root_id, root_ptr) = context.pagecache.allocate(root, guard)?;
 
         debug!("allocated pid {} for root of new_tree {:?}", root_id, name);

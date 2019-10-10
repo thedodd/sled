@@ -1420,7 +1420,8 @@ impl Tree {
 
         new_root_vec.push((at, to));
 
-        let new_root = Frag::root(Data::Index(new_root_vec));
+        let new_root =
+            Frag::root(Data::Index(new_root_vec.into_iter().collect()));
 
         let (new_root_pid, new_root_ptr) =
             self.context.pagecache.allocate(new_root, guard)?;
@@ -1648,10 +1649,10 @@ impl Tree {
             }
 
             if view.data.is_index() {
-                let next = view.index_next_node(key.as_ref());
-                took_leftmost_branch = next.0 == 0;
+                let (took_leftmost_branch, next_pid) =
+                    view.index_next_node(key.as_ref());
                 parent_view = Some(view);
-                cursor = next.1;
+                cursor = next_pid;
             } else {
                 assert!(!overshot && !undershot);
                 return Ok(view);
