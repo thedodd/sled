@@ -881,8 +881,44 @@ impl PageCache {
 
         trace!("linking pid {} with {:?}", pid, frag);
 
+        // A failure injector that fails links randomly
+        // during test to ensure interleaving coverage.
+        #[cfg(any(test, feature = "lock_free_delays"))]
+        {
+            use std::cell::RefCell;
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            thread_local! {
+                pub static COUNT: RefCell<u32> = RefCell::new(1);
+            }
+
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let fail_seed = std::cmp::max(3, now.as_nanos() as u32 % 128);
+
+            let inject_failure = COUNT.with(|c| {
+                let mut cr = c.borrow_mut();
+                *cr += 1;
+                *cr % fail_seed == 0
+            });
+
+            if inject_failure {
+                debug!(
+                    "injecting a randomized failure in the link of pid {}",
+                    pid
+                );
+                if let Some((current_ptr, _frag, _sz)) = self.get(pid, guard)? {
+                    return Ok(Err(Some((current_ptr, new))));
+                } else {
+                    return Ok(Err(None));
+                }
+            }
+        }
+
         /*
         let page_cell = match self.inner.get(pid) {
+
+
+        let stack = match self.inner.get(pid) {
             None => return Ok(Err(None)),
             Some(p) => p,
         };
@@ -1019,6 +1055,39 @@ impl PageCache {
 
         trace!("replacing pid {} with {:?}", pid, new);
 
+        // A failure injector that fails replace calls randomly
+        // during test to ensure interleaving coverage.
+        #[cfg(any(test, feature = "lock_free_delays"))]
+        {
+            use std::cell::RefCell;
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            thread_local! {
+                pub static COUNT: RefCell<u32> = RefCell::new(1);
+            }
+
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let fail_seed = std::cmp::max(3, now.as_nanos() as u32 % 128);
+
+            let inject_failure = COUNT.with(|c| {
+                let mut cr = c.borrow_mut();
+                *cr += 1;
+                *cr % fail_seed == 0
+            });
+
+            if inject_failure {
+                debug!(
+                    "injecting a randomized failure in the replace of pid {}",
+                    pid
+                );
+                if let Some((current_ptr, _frag, _sz)) = self.get(pid, guard)? {
+                    return Ok(Err(Some((current_ptr, new))));
+                } else {
+                    return Ok(Err(None));
+                }
+            }
+        }
+
         let result = self.cas_page(
             pid,
             old_version,
@@ -1026,6 +1095,9 @@ impl PageCache {
             false,
             guard,
         )?;
+
+        let result =
+            self.cas_page(pid, old, Update::Compact(new), false, guard)?;
 
         let to_clean = self.log.with_sa(|sa| sa.clean(pid));
 
